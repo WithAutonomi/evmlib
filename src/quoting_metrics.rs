@@ -32,29 +32,6 @@ pub struct QuotingMetrics {
     pub network_size: Option<u64>,
 }
 
-impl QuotingMetrics {
-    /// construct an empty QuotingMetrics
-    pub fn new() -> Self {
-        Self {
-            // Default to be charged as a `Chunk`
-            data_type: 0,
-            data_size: 0,
-            close_records_stored: 0,
-            max_records: 0,
-            received_payment_count: 0,
-            live_time: 0,
-            network_density: None,
-            network_size: None,
-        }
-    }
-}
-
-impl Default for QuotingMetrics {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Debug for QuotingMetrics {
     fn fmt(&self, formatter: &mut Formatter) -> FmtResult {
         let density_u256 = self.network_density.map(U256::from_be_bytes);
