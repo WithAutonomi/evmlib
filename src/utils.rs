@@ -132,7 +132,7 @@ pub fn get_evm_network_from_env() -> Result<Network, Error> {
 }
 
 /// Get the `Network::Custom` from the local EVM testnet CSV file
-fn local_evm_network_from_csv() -> Result<Network, Error> {
+pub fn local_evm_network_from_csv() -> Result<Network, Error> {
     // load the csv
     let csv_path = get_evm_testnet_csv_path()?;
 
