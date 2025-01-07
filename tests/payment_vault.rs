@@ -116,8 +116,8 @@ async fn test_deploy() {
 }
 
 #[tokio::test]
-async fn test_proxy_reachable() {
-    let network = Network::ArbitrumOne;
+async fn test_proxy_reachable_on_arb_sepolia() {
+    let network = Network::ArbitrumSepolia;
     let provider = http_provider(network.rpc_url().clone());
     let payment_vault = PaymentVaultHandler::new(*network.data_payments_address(), provider);
 
@@ -130,7 +130,58 @@ async fn test_proxy_reachable() {
 }
 
 #[tokio::test]
-async fn test_verify_payment() {
+async fn test_get_quote_on_arb_sepolia_test() {
+    let network = Network::ArbitrumSepoliaTest;
+    let provider = http_provider(network.rpc_url().clone());
+    let payment_vault = PaymentVaultHandler::new(*network.data_payments_address(), provider);
+
+    let quoting_metrics = QuotingMetrics {
+        close_records_stored: 10,
+        max_records: 16 * 1024,
+        received_payment_count: 0,
+        live_time: 1400,
+        network_density: Some([
+            4, 4, 224, 228, 247, 252, 14, 44, 67, 21, 153, 47, 244, 18, 232, 1, 152, 195, 44, 43,
+            29, 135, 19, 217, 240, 129, 64, 245, 240, 227, 129, 162,
+        ]),
+        network_size: Some(240),
+    };
+
+    let amount = payment_vault
+        .get_quote(vec![quoting_metrics])
+        .await
+        .unwrap();
+
+    assert_eq!(amount, vec![Amount::from(610678225049958_u64)]);
+}
+
+#[tokio::test]
+async fn test_pay_for_quotes_on_local() {
+    let (_anvil, network_token, mut payment_vault) = setup().await;
+
+    let mut quote_payments = vec![];
+
+    for _ in 0..MAX_TRANSFERS_PER_TRANSACTION {
+        let quote_payment = random_quote_payment();
+        quote_payments.push(quote_payment);
+    }
+
+    let _ = network_token
+        .approve(*payment_vault.contract.address(), U256::MAX)
+        .await
+        .unwrap();
+
+    // Contract provider has a different account coupled to it,
+    // so we set it to the same as the network token contract
+    payment_vault.set_provider(network_token.contract.provider().clone());
+
+    let result = payment_vault.pay_for_quotes(quote_payments).await;
+
+    assert!(result.is_ok(), "Failed with error: {:?}", result.err());
+}
+
+#[tokio::test]
+async fn test_verify_payment_on_local() {
     let (_anvil, network_token, mut payment_vault) = setup().await;
 
     let mut quote_payments = vec![];
@@ -170,29 +221,4 @@ async fn test_verify_payment() {
     for result in results {
         assert!(result.isValid);
     }
-}
-
-#[tokio::test]
-async fn test_pay_for_quotes() {
-    let (_anvil, network_token, mut payment_vault) = setup().await;
-
-    let mut quote_payments = vec![];
-
-    for _ in 0..MAX_TRANSFERS_PER_TRANSACTION {
-        let quote_payment = random_quote_payment();
-        quote_payments.push(quote_payment);
-    }
-
-    let _ = network_token
-        .approve(*payment_vault.contract.address(), U256::MAX)
-        .await
-        .unwrap();
-
-    // Contract provider has a different account coupled to it,
-    // so we set it to the same as the network token contract
-    payment_vault.set_provider(network_token.contract.provider().clone());
-
-    let result = payment_vault.pay_for_quotes(quote_payments).await;
-
-    assert!(result.is_ok(), "Failed with error: {:?}", result.err());
 }

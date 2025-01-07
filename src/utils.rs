@@ -95,12 +95,19 @@ pub fn get_evm_network_from_env() -> Result<Network, Error> {
         .map(|v| v == "arbitrum-sepolia")
         .unwrap_or(false);
 
+    let use_arbitrum_sepolia_test = std::env::var("EVM_NETWORK")
+        .map(|v| v == "arbitrum-sepolia-test")
+        .unwrap_or(false);
+
     if use_arbitrum_one {
         info!("Using Arbitrum One EVM network as EVM_NETWORK is set to 'arbitrum-one'");
         Ok(Network::ArbitrumOne)
     } else if use_arbitrum_sepolia {
         info!("Using Arbitrum Sepolia EVM network as EVM_NETWORK is set to 'arbitrum-sepolia'");
         Ok(Network::ArbitrumSepolia)
+    } else if use_arbitrum_sepolia_test {
+        info!("Using Arbitrum Sepolia Test EVM network as EVM_NETWORK is set to 'arbitrum-sepolia-test'");
+        Ok(Network::ArbitrumSepoliaTest)
     } else if let Ok(evm_vars) = evm_vars {
         info!("Using custom EVM network from environment variables");
         Ok(Network::Custom(CustomNetwork::new(
