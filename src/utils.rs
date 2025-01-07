@@ -47,6 +47,34 @@ pub fn dummy_hash() -> Hash {
     Hash::new(rand::rngs::OsRng.gen())
 }
 
+use std::sync::OnceLock;
+
+static EVM_NETWORK: OnceLock<Network> = OnceLock::new();
+
+/// Initialize the EVM Network parameters from environment variables or local CSV file.
+///
+/// It will first try to get the network from the environment variables.
+/// If it fails and `local` is true, it will try to get the network from the local CSV file.
+/// If both fail, it will return the default network.
+pub fn get_evm_network(local: bool) -> Result<Network, Error> {
+    if let Some(network) = EVM_NETWORK.get() {
+        return Ok(network.clone());
+    }
+
+    let res = match get_evm_network_from_env() {
+        Ok(evm_network) => Ok(evm_network),
+        Err(_) if local => Ok(local_evm_network_from_csv()
+            .map_err(|e| Error::FailedToGetEvmNetwork(e.to_string()))?),
+        Err(_) => Ok(Network::default()),
+    };
+
+    if let Ok(network) = res.as_ref() {
+        let _ = EVM_NETWORK.set(network.clone());
+    }
+
+    res
+}
+
 pub fn get_evm_testnet_csv_path() -> Result<PathBuf, Error> {
     let file = data_dir()
         .ok_or(Error::FailedToGetEvmNetwork(
@@ -60,7 +88,7 @@ pub fn get_evm_testnet_csv_path() -> Result<PathBuf, Error> {
 /// Get the `Network` from environment variables.
 ///
 /// Returns an error if we cannot obtain the network from any means.
-pub fn get_evm_network_from_env() -> Result<Network, Error> {
+fn get_evm_network_from_env() -> Result<Network, Error> {
     let evm_vars = [
         env::var(RPC_URL)
             .ok()
@@ -126,7 +154,7 @@ pub fn get_evm_network_from_env() -> Result<Network, Error> {
 }
 
 /// Get the `Network::Custom` from the local EVM testnet CSV file
-pub fn local_evm_network_from_csv() -> Result<Network, Error> {
+fn local_evm_network_from_csv() -> Result<Network, Error> {
     // load the csv
     let csv_path = get_evm_testnet_csv_path()?;
 
