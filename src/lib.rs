@@ -7,6 +7,7 @@
 // permissions and limitations relating to use of the SAFE Network Software.
 
 use crate::common::Address;
+use crate::utils::get_evm_network;
 use alloy::primitives::address;
 use alloy::transports::http::reqwest;
 use serde::{Deserialize, Serialize};
@@ -28,7 +29,7 @@ pub mod utils;
 pub mod wallet;
 
 /// Timeout for transactions
-const TX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const TX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 static PUBLIC_ARBITRUM_ONE_HTTP_RPC_URL: LazyLock<reqwest::Url> = LazyLock::new(|| {
     "https://arb1.arbitrum.io/rpc"
@@ -103,6 +104,12 @@ impl std::fmt::Display for Network {
 }
 
 impl Network {
+    pub fn new(local: bool) -> Result<Self, utils::Error> {
+        get_evm_network(local).inspect_err(|err| {
+            warn!("Failed to select EVM network from ENV: {err}");
+        })
+    }
+
     pub fn new_custom(rpc_url: &str, payment_token_addr: &str, chunk_payments_addr: &str) -> Self {
         Self::Custom(CustomNetwork::new(
             rpc_url,
