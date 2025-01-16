@@ -136,6 +136,8 @@ async fn test_get_quote_on_arb_sepolia_test() {
     let payment_vault = PaymentVaultHandler::new(*network.data_payments_address(), provider);
 
     let quoting_metrics = QuotingMetrics {
+        data_type: 1, // a GraphEntry record
+        data_size: 100,
         close_records_stored: 10,
         max_records: 16 * 1024,
         received_payment_count: 0,
