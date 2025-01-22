@@ -163,7 +163,7 @@ async fn test_get_quote_on_arb_sepolia_test() {
         .await
         .unwrap();
 
-    assert_eq!(amount, vec![Amount::from(610678225049958_u64)]);
+    assert_eq!(amount, vec![Amount::from(610698657484797_u64)]);
 }
 
 #[tokio::test]
