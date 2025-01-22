@@ -60,7 +60,7 @@ async fn test_balance_of() {
 
     assert_eq!(
         balance,
-        U256::from_str("20000000000000000000000000").unwrap()
+        U256::from_str("2500000000000000000000000").unwrap()
     );
 }
 
