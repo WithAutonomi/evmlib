@@ -126,6 +126,7 @@ async fn test_proxy_reachable_on_arb_sepolia() {
             data_size: 0,
             data_type: 0,
             close_records_stored: 0,
+            records_per_type: vec![],
             max_records: 0,
             received_payment_count: 0,
             live_time: 0,
@@ -148,6 +149,7 @@ async fn test_get_quote_on_arb_sepolia_test() {
         data_type: 1, // a GraphEntry record
         data_size: 100,
         close_records_stored: 10,
+        records_per_type: vec![(0, 5), (1, 5)],
         max_records: 16 * 1024,
         received_payment_count: 0,
         live_time: 1400,
@@ -222,6 +224,7 @@ async fn test_verify_payment_on_local() {
                 data_size: 0,
                 data_type: 0,
                 close_records_stored: 0,
+                records_per_type: vec![],
                 max_records: 0,
                 received_payment_count: 0,
                 live_time: 0,
