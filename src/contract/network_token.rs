@@ -8,7 +8,7 @@
 
 use crate::common::{Address, Calldata, TxHash, U256};
 use crate::contract::network_token::NetworkTokenContract::NetworkTokenContractInstance;
-use crate::retry::{send_transaction_with_retries, with_retries};
+use crate::retry::{retry, send_transaction_with_retries};
 use alloy::providers::{Network, Provider};
 use alloy::sol;
 use alloy::transports::{RpcError, Transport, TransportErrorKind};
@@ -64,9 +64,13 @@ where
     /// Get the raw token balance of an address.
     pub async fn balance_of(&self, account: Address) -> Result<U256, Error> {
         debug!("Getting balance of account: {account:?}");
-        let balance = with_retries(|| async { self.contract.balanceOf(account).call().await })
-            .await?
-            ._0;
+        let balance = retry(
+            || async { self.contract.balanceOf(account).call().await },
+            "balanceOf",
+            None,
+        )
+        .await?
+        ._0;
         debug!("Balance of account {account} is {balance}");
         Ok(balance)
     }
@@ -74,10 +78,13 @@ where
     /// See how many tokens are approved to be spent.
     pub async fn allowance(&self, owner: Address, spender: Address) -> Result<U256, Error> {
         debug!("Getting allowance of owner: {owner} for spender: {spender}");
-        let allowance =
-            with_retries(|| async { self.contract.allowance(owner, spender).call().await })
-                .await?
-                ._0;
+        let allowance = retry(
+            || async { self.contract.allowance(owner, spender).call().await },
+            "allowance",
+            None,
+        )
+        .await?
+        ._0;
         debug!("Allowance of owner: {owner} for spender: {spender} is: {allowance}");
         Ok(allowance)
     }

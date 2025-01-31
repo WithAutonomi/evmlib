@@ -2,7 +2,7 @@ use crate::common::{Address, Amount, Calldata, TxHash};
 use crate::contract::payment_vault::error::Error;
 use crate::contract::payment_vault::interface::IPaymentVault;
 use crate::contract::payment_vault::interface::IPaymentVault::IPaymentVaultInstance;
-use crate::retry::{send_transaction_with_retries, with_retries};
+use crate::retry::{retry, send_transaction_with_retries};
 use alloy::network::Network;
 use alloy::providers::Provider;
 use alloy::transports::Transport;
@@ -38,10 +38,13 @@ where
 
         debug!("Getting quotes for metrics: {metrics:?}");
 
-        let mut amounts =
-            with_retries(|| async { self.contract.getQuote(metrics.clone()).call().await })
-                .await?
-                .prices;
+        let mut amounts = retry(
+            || async { self.contract.getQuote(metrics.clone()).call().await },
+            "getQuote",
+            None,
+        )
+        .await?
+        .prices;
 
         // FIXME: temporary logic until the local smart contract gets updated
         if amounts.len() == 1 {
@@ -94,12 +97,16 @@ where
 
         debug!("Verifying payments: {payment_verifications:?}");
 
-        let results = with_retries(|| async {
-            self.contract
-                .verifyPayment(payment_verifications.clone())
-                .call()
-                .await
-        })
+        let results = retry(
+            || async {
+                self.contract
+                    .verifyPayment(payment_verifications.clone())
+                    .call()
+                    .await
+            },
+            "verifyPayment",
+            None,
+        )
         .await?
         .verificationResults;
 

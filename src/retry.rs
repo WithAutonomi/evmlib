@@ -6,25 +6,39 @@ use alloy::transports::Transport;
 use std::time::Duration;
 
 pub(crate) const MAX_RETRIES: u8 = 3;
+const DEFAULT_RETRY_INTERVAL_MS: u64 = 1000;
 
-pub(crate) async fn with_retries<F, Fut, T, E>(mut action: F) -> Result<T, E>
+/// Execute an async closure that returns a result. Retry on failure.
+pub(crate) async fn retry<F, Fut, T, E>(
+    mut action: F,
+    operation_id: &str,
+    retry_interval_ms: Option<u64>,
+) -> Result<T, E>
 where
     F: FnMut() -> Fut + Send,
     Fut: std::future::Future<Output = Result<T, E>> + Send,
     E: std::fmt::Debug,
 {
     let mut retries = 0;
+
     loop {
         match action().await {
             Ok(result) => return Ok(result),
             Err(err) => {
                 if retries == MAX_RETRIES {
-                    error!("Operation failed after {retries} retries: {err:?}");
+                    error!("{operation_id} failed after {retries} retries: {err:?}");
                     return Err(err);
                 }
+
                 retries += 1;
-                let delay = Duration::from_secs(retries.pow(2) as u64);
-                warn!("Retry #{retries} in {delay:?} due to error: {err:?}");
+                let retry_interval_ms = retry_interval_ms.unwrap_or(DEFAULT_RETRY_INTERVAL_MS);
+                let delay = Duration::from_millis(retry_interval_ms * retries.pow(2) as u64);
+
+                warn!(
+                    "Error trying {operation_id}: {err:?}. Retry #{retries} in {:?} second(s).",
+                    delay.as_secs()
+                );
+
                 tokio::time::sleep(delay).await;
             }
         }
@@ -33,7 +47,7 @@ where
 
 /// Generic function to send a transaction with retries.
 pub(crate) async fn send_transaction_with_retries<P, T, N, E>(
-    provider: P,
+    provider: &P,
     calldata: Calldata,
     to: Address,
     tx_identifier: &str,
@@ -55,6 +69,7 @@ where
                 .with_to(to)
                 .with_input(calldata.clone());
 
+            // Retry with the same nonce to replace a stuck transaction
             if let Some(nonce) = nonce {
                 transaction_request.set_nonce(nonce);
             } else {
@@ -70,15 +85,19 @@ where
                 pending_tx_builder.tx_hash()
             );
 
-            with_retries(|| async {
-                PendingTransactionBuilder::from_config(
-                    provider.root().clone(),
-                    pending_tx_builder.inner().clone(),
-                )
-                .with_timeout(Some(TX_TIMEOUT))
-                .watch()
-                .await
-            })
+            retry(
+                || async {
+                    PendingTransactionBuilder::from_config(
+                        provider.root().clone(),
+                        pending_tx_builder.inner().clone(),
+                    )
+                    .with_timeout(Some(TX_TIMEOUT))
+                    .watch()
+                    .await
+                },
+                "watching pending transaction",
+                None,
+            )
             .await
         };
 
@@ -94,15 +113,16 @@ where
                 }
 
                 retries += 1;
-                let retry_delay_secs = retries.pow(2) as u64;
+                let retry_interval_ms = DEFAULT_RETRY_INTERVAL_MS;
+                let delay = Duration::from_millis(retry_interval_ms * retries.pow(2) as u64);
 
                 warn!(
-                        "Error sending and confirming {tx_identifier} transaction: {err:?}. Try #{}. Trying again in {} second(s).",
-                        retries,
-                        retry_delay_secs
-                    );
+                    "Error sending and confirming {tx_identifier} transaction: {err:?}. Retry #{} in {} second(s).",
+                    retries,
+                    delay.as_secs(),
+                );
 
-                tokio::time::sleep(Duration::from_secs(retry_delay_secs)).await;
+                tokio::time::sleep(delay).await;
             }
         }
     }
