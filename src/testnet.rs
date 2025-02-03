@@ -6,7 +6,7 @@
 // KIND, either express or implied. Please review the Licences for the specific language governing
 // permissions and limitations relating to use of the SAFE Network Software.
 
-use crate::common::{Address, Amount};
+use crate::common::Address;
 use crate::contract::network_token::NetworkToken;
 use crate::contract::payment_vault;
 use crate::contract::payment_vault::handler::PaymentVaultHandler;
@@ -21,8 +21,6 @@ use alloy::providers::fillers::{
 use alloy::providers::{Identity, ProviderBuilder, ReqwestProvider};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::transports::http::{Client, Http};
-
-const BATCH_LIMIT: u16 = 256;
 
 pub struct Testnet {
     anvil: AnvilInstance,
@@ -150,8 +148,7 @@ pub async fn deploy_data_payments_contract(
 
     // Deploy the contract.
     let payment_vault_contract_address =
-        payment_vault::implementation::deploy(&provider, token_address, Amount::from(BATCH_LIMIT))
-            .await;
+        payment_vault::implementation::deploy(&provider, token_address).await;
 
     // Create a handler for the deployed contract
     PaymentVaultHandler::new(payment_vault_contract_address, provider)

@@ -44,9 +44,36 @@
       {
         "components": [
           {
+            "internalType": "enum IPaymentVault.DataType",
+            "name": "dataType",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint256",
+            "name": "dataSize",
+            "type": "uint256"
+          },
+          {
             "internalType": "uint256",
             "name": "closeRecordsStored",
             "type": "uint256"
+          },
+          {
+            "components": [
+              {
+                "internalType": "enum IPaymentVault.DataType",
+                "name": "dataType",
+                "type": "uint8"
+              },
+              {
+                "internalType": "uint256",
+                "name": "records",
+                "type": "uint256"
+              }
+            ],
+            "internalType": "struct IPaymentVault.Record[]",
+            "name": "recordsPerType",
+            "type": "tuple[]"
           },
           {
             "internalType": "uint256",
@@ -127,9 +154,36 @@
           {
             "components": [
               {
+                "internalType": "enum IPaymentVault.DataType",
+                "name": "dataType",
+                "type": "uint8"
+              },
+              {
+                "internalType": "uint256",
+                "name": "dataSize",
+                "type": "uint256"
+              },
+              {
                 "internalType": "uint256",
                 "name": "closeRecordsStored",
                 "type": "uint256"
+              },
+              {
+                "components": [
+                  {
+                    "internalType": "enum IPaymentVault.DataType",
+                    "name": "dataType",
+                    "type": "uint8"
+                  },
+                  {
+                    "internalType": "uint256",
+                    "name": "records",
+                    "type": "uint256"
+                  }
+                ],
+                "internalType": "struct IPaymentVault.Record[]",
+                "name": "recordsPerType",
+                "type": "tuple[]"
               },
               {
                 "internalType": "uint256",

@@ -86,8 +86,8 @@ impl CustomNetwork {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum Network {
-    ArbitrumOne,
     #[default]
+    ArbitrumOne,
     ArbitrumSepolia,
     ArbitrumSepoliaTest,
     Custom(CustomNetwork),
