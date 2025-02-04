@@ -41,7 +41,7 @@ where
         let mut amounts = retry(
             || async { self.contract.getQuote(metrics.clone()).call().await },
             "getQuote",
-            Some(4000),
+            None,
         )
         .await?
         .prices;
