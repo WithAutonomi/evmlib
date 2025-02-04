@@ -12,4 +12,6 @@ pub enum Error {
     PaymentInvalid,
     #[error("Payment verification length must be 3.")]
     PaymentVerificationLengthInvalid,
+    #[error("Timeout: {0:?}")]
+    Timeout(#[from] tokio::time::error::Elapsed),
 }

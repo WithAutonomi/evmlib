@@ -57,58 +57,36 @@ where
     P: Provider<T, N>,
     N: Network,
     E: From<alloy::transports::RpcError<alloy::transports::TransportErrorKind>>
-        + From<alloy::providers::PendingTransactionError>,
+        + From<alloy::providers::PendingTransactionError>
+        + From<tokio::time::error::Elapsed>,
 {
     let mut nonce: Option<u64> = None;
     let mut retries = 0;
 
     loop {
-        let result = {
-            let mut transaction_request = provider
-                .transaction_request()
-                .with_to(to)
-                .with_input(calldata.clone());
+        let mut transaction_request = provider
+            .transaction_request()
+            .with_to(to)
+            .with_input(calldata.clone());
 
-            // Retry with the same nonce to replace a stuck transaction
-            if let Some(nonce) = nonce {
-                transaction_request.set_nonce(nonce);
-            } else {
-                nonce = transaction_request.nonce();
-            }
+        // Retry with the same nonce to replace a stuck transaction
+        if let Some(nonce) = nonce {
+            transaction_request.set_nonce(nonce);
+        } else {
+            nonce = transaction_request.nonce();
+        }
 
-            let pending_tx_builder = provider
-                .send_transaction(transaction_request.clone())
-                .await?;
+        let pending_tx_builder_result = tokio::time::timeout(
+            Duration::from_secs(5),
+            provider.send_transaction(transaction_request.clone()),
+        )
+        .await;
 
-            debug!(
-                "{tx_identifier} transaction is pending with tx_hash: {:?}",
-                pending_tx_builder.tx_hash()
-            );
-
-            retry(
-                || async {
-                    PendingTransactionBuilder::from_config(
-                        provider.root().clone(),
-                        pending_tx_builder.inner().clone(),
-                    )
-                    .with_timeout(Some(TX_TIMEOUT))
-                    .watch()
-                    .await
-                },
-                "watching pending transaction",
-                None,
-            )
-            .await
-        };
-
-        match result {
-            Ok(tx_hash) => {
-                debug!("{tx_identifier} transaction with hash {tx_hash:?} is successful");
-                break Ok(tx_hash);
-            }
-            Err(err) => {
+        let pending_tx_builder = match pending_tx_builder_result {
+            Ok(Ok(pending_tx_builder)) => pending_tx_builder,
+            Ok(Err(err)) => {
                 if retries == MAX_RETRIES {
-                    error!("Failed to send and confirm {tx_identifier} transaction after {retries} retries. Giving up. Error: {err:?}");
+                    error!("Failed to send {tx_identifier} transaction after {retries} retries. Giving up. Error: {err:?}");
                     break Err(E::from(err));
                 }
 
@@ -117,7 +95,74 @@ where
                 let delay = Duration::from_millis(retry_interval_ms * retries.pow(2) as u64);
 
                 warn!(
-                    "Error sending and confirming {tx_identifier} transaction: {err:?}. Retry #{} in {} second(s).",
+                        "Error sending {tx_identifier} transaction: {err:?}. Retry #{} in {} second(s).",
+                        retries,
+                        delay.as_secs(),
+                    );
+
+                tokio::time::sleep(delay).await;
+
+                continue;
+            }
+            Err(err) => {
+                if retries == MAX_RETRIES {
+                    error!("Failed to send {tx_identifier} transaction after {retries} retries. Giving up. Error: {err:?}");
+                    break Err(E::from(err));
+                }
+
+                retries += 1;
+                let retry_interval_ms = DEFAULT_RETRY_INTERVAL_MS;
+                let delay = Duration::from_millis(retry_interval_ms * retries.pow(2) as u64);
+
+                warn!(
+                        "Error sending {tx_identifier} transaction: {err:?}. Retry #{} in {} second(s).",
+                        retries,
+                        delay.as_secs(),
+                    );
+
+                tokio::time::sleep(delay).await;
+
+                continue;
+            }
+        };
+
+        debug!(
+            "{tx_identifier} transaction is pending with tx_hash: {:?}",
+            pending_tx_builder.tx_hash()
+        );
+
+        let watch_result = retry(
+            || async {
+                PendingTransactionBuilder::from_config(
+                    provider.root().clone(),
+                    pending_tx_builder.inner().clone(),
+                )
+                .with_timeout(Some(TX_TIMEOUT))
+                .watch()
+                .await
+            },
+            "watching pending transaction",
+            None,
+        )
+        .await;
+
+        match watch_result {
+            Ok(tx_hash) => {
+                debug!("{tx_identifier} transaction with hash {tx_hash:?} is successful");
+                break Ok(tx_hash);
+            }
+            Err(err) => {
+                if retries == MAX_RETRIES {
+                    error!("Failed to confirm {tx_identifier} transaction after {retries} retries. Giving up. Error: {err:?}");
+                    break Err(E::from(err));
+                }
+
+                retries += 1;
+                let retry_interval_ms = DEFAULT_RETRY_INTERVAL_MS;
+                let delay = Duration::from_millis(retry_interval_ms * retries.pow(2) as u64);
+
+                warn!(
+                    "Error confirming {tx_identifier} transaction: {err:?}. Retry #{} in {} second(s).",
                     retries,
                     delay.as_secs(),
                 );

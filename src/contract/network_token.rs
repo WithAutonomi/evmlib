@@ -29,6 +29,8 @@ pub enum Error {
     RpcError(#[from] RpcError<TransportErrorKind>),
     #[error(transparent)]
     PendingTransactionError(#[from] alloy::providers::PendingTransactionError),
+    #[error("Timeout: {0:?}")]
+    Timeout(#[from] tokio::time::error::Elapsed),
 }
 
 pub struct NetworkToken<T: Transport + Clone, P: Provider<T, N>, N: Network> {
