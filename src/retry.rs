@@ -6,7 +6,9 @@ use alloy::transports::Transport;
 use std::time::Duration;
 
 pub(crate) const MAX_RETRIES: u8 = 3;
-const DEFAULT_RETRY_INTERVAL_MS: u64 = 1000;
+const DEFAULT_RETRY_INTERVAL_MS: u64 = 4000;
+const BROADCAST_TRANSACTION_TIMEOUT_MS: u64 = 5000;
+const WATCH_TIMEOUT_MS: u64 = 1000;
 
 /// Execute an async closure that returns a result. Retry on failure.
 pub(crate) async fn retry<F, Fut, T, E>(
@@ -77,7 +79,7 @@ where
         }
 
         let pending_tx_builder_result = tokio::time::timeout(
-            Duration::from_secs(5),
+            Duration::from_millis(BROADCAST_TRANSACTION_TIMEOUT_MS),
             provider.send_transaction(transaction_request.clone()),
         )
         .await;
@@ -142,7 +144,7 @@ where
                 .await
             },
             "watching pending transaction",
-            None,
+            Some(WATCH_TIMEOUT_MS),
         )
         .await;
 
