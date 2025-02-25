@@ -24,7 +24,6 @@ use alloy::transports::http::{Client, Http};
 
 pub struct Testnet {
     anvil: AnvilInstance,
-    rpc_url: Url,
     network_token_address: Address,
     data_payments_address: Address,
 }
@@ -32,24 +31,30 @@ pub struct Testnet {
 impl Testnet {
     /// Starts an Anvil node and automatically deploys the network token and chunk payments smart contracts.
     pub async fn new() -> Self {
-        let (anvil, rpc_url) = start_node();
+        let node = start_node();
 
-        let network_token = deploy_network_token_contract(&rpc_url, &anvil).await;
-        let data_payments =
-            deploy_data_payments_contract(&rpc_url, &anvil, *network_token.contract.address())
-                .await;
+        let network_token = deploy_network_token_contract(&node.endpoint_url(), &node).await;
+        let data_payments = deploy_data_payments_contract(
+            &node.endpoint_url(),
+            &node,
+            *network_token.contract.address(),
+        )
+        .await;
 
         Testnet {
-            anvil,
-            rpc_url,
+            anvil: node,
             network_token_address: *network_token.contract.address(),
             data_payments_address: *data_payments.contract.address(),
         }
     }
 
+    pub fn rpc_url(&self) -> Url {
+        self.anvil.endpoint_url()
+    }
+
     pub fn to_network(&self) -> Network {
         Network::Custom(CustomNetwork {
-            rpc_url_http: self.rpc_url.clone(),
+            rpc_url_http: self.rpc_url(),
             payment_token_address: self.network_token_address,
             data_payments_address: self.data_payments_address,
         })
@@ -68,21 +73,16 @@ impl Testnet {
 /// return the RPC URL if we want to listen on a different address.
 ///
 /// The `anvil` binary respects the `ANVIL_IP_ADDR` environment variable, but defaults to "localhost".
-pub fn start_node() -> (AnvilInstance, Url) {
-    let host = std::env::var("ANVIL_IP_ADDR").unwrap_or_else(|_| "localhost".to_string());
+pub fn start_node() -> AnvilInstance {
     let port = std::env::var("ANVIL_PORT")
-        .unwrap_or_else(|_| "4343".to_string())
+        .unwrap_or(0.to_string())
         .parse::<u16>()
         .expect("Invalid port number");
 
-    let anvil = Anvil::new()
+    Anvil::new()
         .port(port)
         .try_spawn()
-        .expect("Could not spawn Anvil node");
-
-    let url = Url::parse(&format!("http://{host}:{port}")).expect("Failed to parse URL");
-
-    (anvil, url)
+        .expect("Could not spawn Anvil node")
 }
 
 pub async fn deploy_network_token_contract(
@@ -152,4 +152,17 @@ pub async fn deploy_data_payments_contract(
 
     // Create a handler for the deployed contract
     PaymentVaultHandler::new(payment_vault_contract_address, provider)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::testnet::Testnet;
+
+    #[tokio::test]
+    async fn test_run_multiple_testnets_in_parallel() {
+        let _testnet_1 = Testnet::new().await;
+        let _testnet_2 = Testnet::new().await;
+        let _testnet_3 = Testnet::new().await;
+        let _testnet_4 = Testnet::new().await;
+    }
 }

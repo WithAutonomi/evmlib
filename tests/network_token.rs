@@ -36,11 +36,11 @@ async fn setup() -> (
         Ethereum,
     >,
 ) {
-    let (anvil, rpc_url) = start_node();
+    let node = start_node();
 
-    let network_token = deploy_network_token_contract(&rpc_url, &anvil).await;
+    let network_token = deploy_network_token_contract(&node.endpoint_url(), &node).await;
 
-    (anvil, network_token)
+    (node, network_token)
 }
 
 #[tokio::test]

@@ -17,14 +17,14 @@ use std::collections::HashSet;
 
 #[allow(clippy::unwrap_used)]
 async fn local_testnet() -> (AnvilInstance, Network, EthereumWallet) {
-    let (anvil, rpc_url) = start_node();
-    let network_token = deploy_network_token_contract(&rpc_url, &anvil).await;
+    let node = start_node();
+    let rpc_url = node.endpoint_url();
+    let network_token = deploy_network_token_contract(&rpc_url, &node).await;
     let payment_token_address = *network_token.contract.address();
-    let data_payments =
-        deploy_data_payments_contract(&rpc_url, &anvil, payment_token_address).await;
+    let data_payments = deploy_data_payments_contract(&rpc_url, &node, payment_token_address).await;
 
     (
-        anvil,
+        node,
         Network::Custom(CustomNetwork {
             rpc_url_http: rpc_url,
             payment_token_address,
