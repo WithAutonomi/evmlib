@@ -9,6 +9,7 @@
 use crate::common::{Address, Calldata, TxHash, U256};
 use crate::contract::network_token::NetworkTokenContract::NetworkTokenContractInstance;
 use crate::retry::{retry, send_transaction_with_retries};
+use crate::transaction_config::TransactionConfig;
 use alloy::providers::{Network, Provider};
 use alloy::sol;
 use alloy::transports::{RpcError, Transport, TransportErrorKind};
@@ -92,10 +93,22 @@ where
     }
 
     /// Approve spender to spend a raw amount of tokens.
-    pub async fn approve(&self, spender: Address, value: U256) -> Result<TxHash, Error> {
+    pub async fn approve(
+        &self,
+        spender: Address,
+        value: U256,
+        transaction_config: &TransactionConfig,
+    ) -> Result<TxHash, Error> {
         debug!("Approving spender {spender:?} to spend {value}");
         let (calldata, to) = self.approve_calldata(spender, value);
-        send_transaction_with_retries(self.contract.provider(), calldata, to, "approve").await
+        send_transaction_with_retries(
+            self.contract.provider(),
+            calldata,
+            to,
+            "approve",
+            transaction_config,
+        )
+        .await
     }
 
     /// Approve spender to spend a raw amount of tokens.
@@ -106,10 +119,22 @@ where
     }
 
     /// Transfer a raw amount of tokens.
-    pub async fn transfer(&self, receiver: Address, amount: U256) -> Result<TxHash, Error> {
+    pub async fn transfer(
+        &self,
+        receiver: Address,
+        amount: U256,
+        transaction_config: &TransactionConfig,
+    ) -> Result<TxHash, Error> {
         debug!("Transferring raw amount of tokens: {amount} to {receiver:?}");
         let (calldata, to) = self.transfer_calldata(receiver, amount);
-        send_transaction_with_retries(self.contract.provider(), calldata, to, "transfer").await
+        send_transaction_with_retries(
+            self.contract.provider(),
+            calldata,
+            to,
+            "transfer",
+            transaction_config,
+        )
+        .await
     }
 
     /// Transfer a raw amount of tokens.
