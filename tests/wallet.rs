@@ -11,6 +11,7 @@ use evmlib::common::{Amount, TxHash};
 use evmlib::contract::payment_vault::{verify_data_payment, MAX_TRANSFERS_PER_TRANSACTION};
 use evmlib::quoting_metrics::QuotingMetrics;
 use evmlib::testnet::{deploy_data_payments_contract, deploy_network_token_contract, start_node};
+use evmlib::transaction_config::TransactionConfig;
 use evmlib::wallet::{transfer_tokens, wallet_address, Wallet};
 use evmlib::{CustomNetwork, Network};
 use std::collections::HashSet;
@@ -51,12 +52,15 @@ async fn funded_wallet(network: &Network, genesis_wallet: EthereumWallet) -> Wal
         .await
         .unwrap();
 
+    let transaction_config = TransactionConfig::default();
+
     // Fund the wallet with plenty of ERC20 tokens
     transfer_tokens(
         genesis_wallet,
         network,
         account,
         Amount::from(9999999999_u64),
+        &transaction_config,
     )
     .await
     .unwrap();
