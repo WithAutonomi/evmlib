@@ -11,6 +11,7 @@ use crate::contract::network_token::NetworkToken;
 use crate::contract::payment_vault::handler::PaymentVaultHandler;
 use crate::contract::payment_vault::MAX_TRANSFERS_PER_TRANSACTION;
 use crate::contract::{network_token, payment_vault};
+use crate::transaction_config::TransactionConfig;
 use crate::utils::http_provider;
 use crate::{Network, TX_TIMEOUT};
 use alloy::hex::ToHexExt;
@@ -44,6 +45,7 @@ pub enum Error {
 pub struct Wallet {
     wallet: EthereumWallet,
     network: Network,
+    transaction_config: TransactionConfig,
     lock: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -53,6 +55,7 @@ impl Wallet {
         Self {
             wallet,
             network,
+            transaction_config: Default::default(),
             lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -94,7 +97,14 @@ impl Wallet {
         to: Address,
         amount: U256,
     ) -> Result<TxHash, network_token::Error> {
-        transfer_tokens(self.wallet.clone(), &self.network, to, amount).await
+        transfer_tokens(
+            self.wallet.clone(),
+            &self.network,
+            to,
+            amount,
+            &self.transaction_config,
+        )
+        .await
     }
 
     /// Transfer a raw amount of gas tokens to another address.
@@ -117,7 +127,14 @@ impl Wallet {
         spender: Address,
         amount: U256,
     ) -> Result<TxHash, network_token::Error> {
-        approve_to_spend_tokens(self.wallet.clone(), &self.network, spender, amount).await
+        approve_to_spend_tokens(
+            self.wallet.clone(),
+            &self.network,
+            spender,
+            amount,
+            &self.transaction_config,
+        )
+        .await
     }
 
     /// Function for batch payments of quotes. It accepts an iterator of QuotePayment and returns
@@ -126,7 +143,13 @@ impl Wallet {
         &self,
         quote_payments: I,
     ) -> Result<BTreeMap<QuoteHash, TxHash>, PayForQuotesError> {
-        pay_for_quotes(self.wallet.clone(), &self.network, quote_payments).await
+        pay_for_quotes(
+            self.wallet.clone(),
+            &self.network,
+            quote_payments,
+            &self.transaction_config,
+        )
+        .await
     }
 
     /// Build a provider using this wallet.
@@ -144,6 +167,11 @@ impl Wallet {
     pub fn random_private_key() -> String {
         let signer: PrivateKeySigner = LocalSigner::random();
         signer.to_bytes().encode_hex_with_prefix()
+    }
+
+    /// Sets the transaction configuration for the wallet.
+    pub fn set_transaction_config(&mut self, config: TransactionConfig) {
+        self.transaction_config = config;
     }
 }
 
@@ -229,11 +257,14 @@ pub async fn approve_to_spend_tokens(
     network: &Network,
     spender: Address,
     amount: U256,
+    transaction_config: &TransactionConfig,
 ) -> Result<TxHash, network_token::Error> {
     debug!("Approving address/smart contract with {amount} tokens at address: {spender}",);
     let provider = http_provider_with_wallet(network.rpc_url().clone(), wallet);
     let network_token = NetworkToken::new(*network.payment_token_address(), provider);
-    network_token.approve(spender, amount).await
+    network_token
+        .approve(spender, amount, transaction_config)
+        .await
 }
 
 /// Transfer payment tokens from the supplied wallet to an address.
@@ -242,11 +273,14 @@ pub async fn transfer_tokens(
     network: &Network,
     receiver: Address,
     amount: U256,
+    transaction_config: &TransactionConfig,
 ) -> Result<TxHash, network_token::Error> {
     debug!("Transferring {amount} tokens to {receiver}");
     let provider = http_provider_with_wallet(network.rpc_url().clone(), wallet);
     let network_token = NetworkToken::new(*network.payment_token_address(), provider);
-    network_token.transfer(receiver, amount).await
+    network_token
+        .transfer(receiver, amount, transaction_config)
+        .await
 }
 
 /// Transfer native/gas tokens from the supplied wallet to an address.
@@ -290,6 +324,7 @@ pub async fn pay_for_quotes<T: IntoIterator<Item = QuotePayment>>(
     wallet: EthereumWallet,
     network: &Network,
     payments: T,
+    transaction_config: &TransactionConfig,
 ) -> Result<BTreeMap<QuoteHash, TxHash>, PayForQuotesError> {
     let payments: Vec<_> = payments.into_iter().collect();
     info!("Paying for quotes of len: {}", payments.len());
@@ -326,6 +361,7 @@ pub async fn pay_for_quotes<T: IntoIterator<Item = QuotePayment>>(
             network,
             *network.data_payments_address(),
             U256::MAX,
+            transaction_config,
         )
         .await
         .map_err(|err| PayForQuotesError(Error::from(err), Default::default()))?;
@@ -354,7 +390,7 @@ pub async fn pay_for_quotes<T: IntoIterator<Item = QuotePayment>>(
         );
 
         let tx_hash = data_payments
-            .pay_for_quotes(batch.clone())
+            .pay_for_quotes(batch.clone(), transaction_config)
             .await
             .map_err(|err| PayForQuotesError(Error::from(err), tx_hashes_by_quote.clone()))?;
 

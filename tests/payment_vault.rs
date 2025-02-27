@@ -17,6 +17,7 @@ use evmlib::contract::payment_vault::handler::PaymentVaultHandler;
 use evmlib::contract::payment_vault::{interface, MAX_TRANSFERS_PER_TRANSACTION};
 use evmlib::quoting_metrics::QuotingMetrics;
 use evmlib::testnet::{deploy_data_payments_contract, deploy_network_token_contract, start_node};
+use evmlib::transaction_config::TransactionConfig;
 use evmlib::utils::http_provider;
 use evmlib::wallet::wallet_address;
 use evmlib::Network;
@@ -146,6 +147,8 @@ async fn test_get_quote_on_arb_sepolia() {
 async fn test_pay_for_quotes_on_local() {
     let (_anvil, network_token, mut payment_vault) = setup().await;
 
+    let transaction_config = TransactionConfig::default();
+
     let mut quote_payments = vec![];
 
     for _ in 0..MAX_TRANSFERS_PER_TRANSACTION {
@@ -154,7 +157,11 @@ async fn test_pay_for_quotes_on_local() {
     }
 
     let _ = network_token
-        .approve(*payment_vault.contract.address(), U256::MAX)
+        .approve(
+            *payment_vault.contract.address(),
+            U256::MAX,
+            &transaction_config,
+        )
         .await
         .unwrap();
 
@@ -162,7 +169,9 @@ async fn test_pay_for_quotes_on_local() {
     // so we set it to the same as the network token contract
     payment_vault.set_provider(network_token.contract.provider().clone());
 
-    let result = payment_vault.pay_for_quotes(quote_payments).await;
+    let result = payment_vault
+        .pay_for_quotes(quote_payments, &transaction_config)
+        .await;
 
     assert!(result.is_ok(), "Failed with error: {:?}", result.err());
 }
@@ -170,6 +179,8 @@ async fn test_pay_for_quotes_on_local() {
 #[tokio::test]
 async fn test_verify_payment_on_local() {
     let (_anvil, network_token, mut payment_vault) = setup().await;
+
+    let transaction_config = TransactionConfig::default();
 
     let mut quote_payments = vec![];
 
@@ -179,7 +190,11 @@ async fn test_verify_payment_on_local() {
     }
 
     let _ = network_token
-        .approve(*payment_vault.contract.address(), U256::MAX)
+        .approve(
+            *payment_vault.contract.address(),
+            U256::MAX,
+            &transaction_config,
+        )
         .await
         .unwrap();
 
@@ -187,7 +202,9 @@ async fn test_verify_payment_on_local() {
     // so we set it to the same as the network token contract
     payment_vault.set_provider(network_token.contract.provider().clone());
 
-    let result = payment_vault.pay_for_quotes(quote_payments.clone()).await;
+    let result = payment_vault
+        .pay_for_quotes(quote_payments.clone(), &transaction_config)
+        .await;
 
     assert!(result.is_ok(), "Failed with error: {:?}", result.err());
 
