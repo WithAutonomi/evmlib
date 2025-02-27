@@ -1,4 +1,4 @@
-const DEFAULT_MAX_FEE_PER_GAS: u128 = 40_000_000;
+const DEFAULT_MAX_FEE_PER_GAS: u128 = 200_000_000; // 0.2 Gwei
 
 #[derive(Clone, Debug)]
 pub struct TransactionConfig {
