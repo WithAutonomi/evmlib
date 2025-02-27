@@ -26,6 +26,7 @@ pub mod external_signer;
 pub mod quoting_metrics;
 mod retry;
 pub mod testnet;
+pub mod transaction_config;
 pub mod utils;
 pub mod wallet;
 

@@ -1,4 +1,5 @@
 use crate::common::{Address, Calldata, TxHash};
+use crate::transaction_config::TransactionConfig;
 use crate::TX_TIMEOUT;
 use alloy::network::{Network, TransactionBuilder};
 use alloy::providers::{PendingTransactionBuilder, Provider};
@@ -53,6 +54,7 @@ pub(crate) async fn send_transaction_with_retries<P, T, N, E>(
     calldata: Calldata,
     to: Address,
     tx_identifier: &str,
+    transaction_config: &TransactionConfig,
 ) -> Result<TxHash, E>
 where
     T: Transport + Clone,
@@ -69,7 +71,8 @@ where
         let mut transaction_request = provider
             .transaction_request()
             .with_to(to)
-            .with_input(calldata.clone());
+            .with_input(calldata.clone())
+            .with_max_fee_per_gas(transaction_config.max_fee_per_gas);
 
         // Retry with the same nonce to replace a stuck transaction
         if let Some(nonce) = nonce {

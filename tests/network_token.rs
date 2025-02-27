@@ -11,6 +11,7 @@ use alloy::signers::local::PrivateKeySigner;
 use alloy::transports::http::{Client, Http};
 use evmlib::contract::network_token::NetworkToken;
 use evmlib::testnet::{deploy_network_token_contract, start_node};
+use evmlib::transaction_config::TransactionConfig;
 use evmlib::wallet::wallet_address;
 use std::str::FromStr;
 
@@ -73,9 +74,11 @@ async fn test_approve() {
     let transaction_value = U256::from(1);
     let spender = PrivateKeySigner::random();
 
+    let transaction_config = TransactionConfig::default();
+
     // Approve for the spender to spend a value from the funds of the owner (our default account).
     let approval_result = network_token
-        .approve(spender.address(), transaction_value)
+        .approve(spender.address(), transaction_value, &transaction_config)
         .await;
 
     assert!(

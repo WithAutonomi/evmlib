@@ -3,6 +3,7 @@ use crate::contract::payment_vault::error::Error;
 use crate::contract::payment_vault::interface::IPaymentVault;
 use crate::contract::payment_vault::interface::IPaymentVault::IPaymentVaultInstance;
 use crate::retry::{retry, send_transaction_with_retries};
+use crate::transaction_config::TransactionConfig;
 use alloy::network::Network;
 use alloy::providers::Provider;
 use alloy::transports::Transport;
@@ -61,11 +62,18 @@ where
     pub async fn pay_for_quotes<I: IntoIterator<Item: Into<IPaymentVault::DataPayment>>>(
         &self,
         data_payments: I,
+        transaction_config: &TransactionConfig,
     ) -> Result<TxHash, Error> {
         debug!("Paying for quotes.");
         let (calldata, to) = self.pay_for_quotes_calldata(data_payments)?;
-        send_transaction_with_retries(self.contract.provider(), calldata, to, "pay for quotes")
-            .await
+        send_transaction_with_retries(
+            self.contract.provider(),
+            calldata,
+            to,
+            "pay for quotes",
+            transaction_config,
+        )
+        .await
     }
 
     /// Returns the pay for quotes transaction calldata.
