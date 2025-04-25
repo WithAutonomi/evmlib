@@ -13,9 +13,10 @@ use crate::{CustomNetwork, Network};
 use alloy::network::Ethereum;
 use alloy::providers::fillers::{
     BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill, NonceFiller,
+    SimpleNonceManager,
 };
-use alloy::providers::{Identity, ProviderBuilder, ReqwestProvider};
-use alloy::transports::http::{reqwest, Client, Http};
+use alloy::providers::{Identity, ProviderBuilder, RootProvider};
+use alloy::transports::http::reqwest;
 use dirs_next::data_dir;
 use rand::Rng;
 use std::env;
@@ -187,14 +188,16 @@ pub fn http_provider(
     rpc_url: reqwest::Url,
 ) -> FillProvider<
     JoinFill<
-        Identity,
-        JoinFill<GasFiller, JoinFill<BlobGasFiller, JoinFill<NonceFiller, ChainIdFiller>>>,
+        JoinFill<
+            Identity,
+            JoinFill<GasFiller, JoinFill<BlobGasFiller, JoinFill<NonceFiller, ChainIdFiller>>>,
+        >,
+        NonceFiller<SimpleNonceManager>,
     >,
-    ReqwestProvider,
-    Http<Client>,
+    RootProvider,
     Ethereum,
 > {
     ProviderBuilder::new()
-        .with_recommended_fillers()
-        .on_http(rpc_url)
+        .with_simple_nonce_management()
+        .connect_http(rpc_url)
 }
