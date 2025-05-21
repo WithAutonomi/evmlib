@@ -3,12 +3,6 @@ pub struct TransactionConfig {
     pub max_fee_per_gas: MaxFeePerGas,
 }
 
-impl TransactionConfig {
-    pub fn new(max_fee_per_gas: MaxFeePerGas) -> Self {
-        Self { max_fee_per_gas }
-    }
-}
-
 #[derive(Clone, Debug, Default)]
 pub enum MaxFeePerGas {
     /// Use the current market price for fee per gas. WARNING: This can result in unexpected high gas fees!
