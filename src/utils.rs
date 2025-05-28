@@ -174,9 +174,9 @@ fn get_evm_network_from_env() -> Result<Network, Error> {
     } else if use_local_evm {
         local_evm_network_from_csv()
     } else {
-        error!("Failed to obtain the desired EVM Network through environment variables");
+        error!("Failed to obtain the desired EVM network through environment variables");
         Err(Error::FailedToGetEvmNetwork(
-            "Failed to obtain the desired EVM Network through environment variables".to_string(),
+            "Failed to obtain the desired EVM network through environment variables".to_string(),
         ))
     }
 }
