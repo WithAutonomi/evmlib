@@ -42,7 +42,7 @@ pub enum Error {
     ChunkPaymentsContract(#[from] payment_vault::error::Error),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Wallet {
     wallet: EthereumWallet,
     network: Network,
