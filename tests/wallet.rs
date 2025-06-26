@@ -15,6 +15,7 @@ use evmlib::transaction_config::TransactionConfig;
 use evmlib::wallet::{transfer_tokens, wallet_address, Wallet};
 use evmlib::{CustomNetwork, Network};
 use std::collections::HashSet;
+use std::ops::Mul;
 
 #[allow(clippy::unwrap_used)]
 async fn local_testnet() -> (AnvilInstance, Network, EthereumWallet) {
@@ -69,31 +70,44 @@ async fn funded_wallet(network: &Network, genesis_wallet: EthereumWallet) -> Wal
 
 #[tokio::test]
 async fn test_pay_for_quotes_and_data_payment_verification() {
-    const TRANSFERS: usize = 600;
+    const CHUNK_PAYMENTS: usize = 600;
+    const QUOTES_PER_CHUNK: usize = 5;
 
     let (_anvil, network, genesis_wallet) = local_testnet().await;
     let wallet = funded_wallet(&network, genesis_wallet).await;
 
     let mut quote_payments = vec![];
 
-    for _ in 0..TRANSFERS {
-        let quote = random_quote_payment();
-        quote_payments.push(quote);
+    for _ in 0..CHUNK_PAYMENTS {
+        let mut quotes = vec![];
+
+        for _ in 0..QUOTES_PER_CHUNK {
+            quotes.push(random_quote_payment());
+        }
+
+        quote_payments.push(quotes);
     }
 
-    let tx_hashes = wallet.pay_for_quotes(quote_payments.clone()).await.unwrap();
+    // Would normally only pay the three highest quotes per chunk, but for testing we pay all five.
+    let tx_hashes = wallet
+        .pay_for_quotes(quote_payments.iter().flatten().cloned())
+        .await
+        .unwrap();
 
     let unique_tx_hashes: HashSet<TxHash> = tx_hashes.values().cloned().collect();
 
     assert_eq!(
         unique_tx_hashes.len(),
-        TRANSFERS.div_ceil(MAX_TRANSFERS_PER_TRANSACTION)
+        CHUNK_PAYMENTS
+            .mul(QUOTES_PER_CHUNK)
+            .div_ceil(MAX_TRANSFERS_PER_TRANSACTION)
     );
-    for (quote_hash, reward_addr, _) in quote_payments.iter() {
-        let result = verify_data_payment(
-            &network,
-            vec![*quote_hash],
-            vec![(
+
+    for quotes in quote_payments.iter() {
+        let mut payments_to_verify = vec![];
+
+        for (quote_hash, reward_addr, _) in quotes {
+            payments_to_verify.push((
                 *quote_hash,
                 QuotingMetrics {
                     data_size: 0,
@@ -107,13 +121,14 @@ async fn test_pay_for_quotes_and_data_payment_verification() {
                     network_size: None,
                 },
                 *reward_addr,
-            )],
-        )
-        .await;
+            ));
+        }
+
+        let result = verify_data_payment(&network, vec![], payments_to_verify.clone()).await;
 
         assert!(
             result.is_ok(),
-            "Verification failed for: {quote_hash:?}. Error: {:?}",
+            "Verification failed for: {payments_to_verify:?}. Error: {:?}",
             result.err()
         );
     }
