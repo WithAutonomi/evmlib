@@ -17,7 +17,6 @@ use alloy::providers::fillers::{
 };
 use alloy::providers::{Identity, ProviderBuilder, RootProvider};
 use alloy::transports::http::reqwest;
-use rand::Rng;
 use std::env;
 
 const MAINNET_ID: u8 = 1;
@@ -39,12 +38,14 @@ pub enum Error {
 
 /// Generate a random Address.
 pub fn dummy_address() -> Address {
-    Address::new(rand::rngs::OsRng.gen())
+    use rand::Rng;
+    Address::new(rand::rngs::OsRng.r#gen())
 }
 
 /// Generate a random Hash.
 pub fn dummy_hash() -> Hash {
-    Hash::new(rand::rngs::OsRng.gen())
+    use rand::Rng;
+    Hash::new(rand::rngs::OsRng.r#gen())
 }
 
 use std::sync::OnceLock;
@@ -83,9 +84,12 @@ pub fn get_evm_network(local: bool, network_id: Option<u8>) -> Result<Network, E
                         Ok(Network::ArbitrumSepoliaTest)
                     }
                     _ => {
-                        error!("Network ID {} requires EVM network configuration via environment variables", id);
+                        error!(
+                            "Network ID {} requires EVM network configuration via environment variables",
+                            id
+                        );
                         Err(Error::FailedToGetEvmNetwork(format!(
-                            "Network ID {id} requires EVM network to be configured via environment variables" 
+                            "Network ID {id} requires EVM network to be configured via environment variables"
                         )))
                     }
                 }
@@ -147,7 +151,9 @@ fn get_evm_network_from_env() -> Result<Network, Error> {
         info!("Using Arbitrum One EVM network as EVM_NETWORK is set to 'arbitrum-one'");
         Ok(Network::ArbitrumOne)
     } else if use_arbitrum_sepolia_test {
-        info!("Using Arbitrum Sepolia Test EVM network as EVM_NETWORK is set to 'arbitrum-sepolia-test'");
+        info!(
+            "Using Arbitrum Sepolia Test EVM network as EVM_NETWORK is set to 'arbitrum-sepolia-test'"
+        );
         Ok(Network::ArbitrumSepoliaTest)
     } else if let Ok(evm_vars) = evm_vars {
         info!("Using custom EVM network from environment variables");
