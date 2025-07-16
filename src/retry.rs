@@ -19,7 +19,7 @@ pub enum TransactionError {
     #[error("Transaction failed to send: {0}")]
     TransactionFailedToSend(String),
     #[error("Transaction failed to confirm in time: {0}")]
-    TransactionFailedToConfirm(String, u64), // Includes the nonce
+    TransactionFailedToConfirm(String, Option<u64>), // Includes the nonce
 }
 
 /// Execute an async closure that returns a result. Retry on failure.
@@ -103,8 +103,8 @@ where
                         warn!("Transaction failed to send: {reason}");
                     }
                     TransactionError::TransactionFailedToConfirm(reason, nonce) => {
-                        warn!("Transaction failed to confirm: {reason} (nonce: {nonce})");
-                        previous_nonce = Some(nonce);
+                        warn!("Transaction failed to confirm: {reason} (nonce: {nonce:?})");
+                        previous_nonce = nonce;
                     }
                 }
 
@@ -202,7 +202,7 @@ where
         }
         Err(err) => Err(TransactionError::TransactionFailedToConfirm(
             err.to_string(),
-            nonce.expect("nonce infallible"),
+            nonce,
         )),
     }
 }
