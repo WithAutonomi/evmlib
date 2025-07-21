@@ -160,7 +160,7 @@ impl Wallet {
 
     /// Lock the wallet to prevent concurrent use.
     /// Drop the guard to unlock the wallet.
-    pub async fn lock(&self) -> tokio::sync::MutexGuard<()> {
+    pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.lock.lock().await
     }
 
