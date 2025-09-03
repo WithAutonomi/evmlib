@@ -1,6 +1,6 @@
+use crate::TX_TIMEOUT;
 use crate::common::{Address, Calldata, TxHash};
 use crate::transaction_config::{MaxFeePerGas, TransactionConfig};
-use crate::TX_TIMEOUT;
 use alloy::network::{Network, TransactionBuilder};
 use alloy::providers::{PendingTransactionBuilder, Provider};
 use std::time::Duration;
@@ -19,7 +19,7 @@ pub enum TransactionError {
     #[error("Transaction failed to send: {0}")]
     TransactionFailedToSend(String),
     #[error("Transaction failed to confirm in time: {0}")]
-    TransactionFailedToConfirm(String, u64), // Includes the nonce
+    TransactionFailedToConfirm(String, Option<u64>), // Includes the nonce
 }
 
 /// Execute an async closure that returns a result. Retry on failure.
@@ -88,7 +88,9 @@ where
             Ok(tx_hash) => break Ok(tx_hash),
             Err(err) => {
                 if retries == MAX_RETRIES {
-                    error!("Transaction {tx_identifier} failed after {retries} retries. Giving up. Error: {err:?}");
+                    error!(
+                        "Transaction {tx_identifier} failed after {retries} retries. Giving up. Error: {err:?}"
+                    );
                     break Err(err);
                 }
 
@@ -103,8 +105,8 @@ where
                         warn!("Transaction failed to send: {reason}");
                     }
                     TransactionError::TransactionFailedToConfirm(reason, nonce) => {
-                        warn!("Transaction failed to confirm: {reason} (nonce: {nonce})");
-                        previous_nonce = Some(nonce);
+                        warn!("Transaction failed to confirm: {reason} (nonce: {nonce:?})");
+                        previous_nonce = nonce;
                     }
                 }
 
@@ -171,7 +173,7 @@ where
         Err(_) => {
             return Err(TransactionError::TransactionFailedToSend(
                 "timeout".to_string(),
-            ))
+            ));
         }
     };
 
@@ -202,7 +204,7 @@ where
         }
         Err(err) => Err(TransactionError::TransactionFailedToConfirm(
             err.to_string(),
-            nonce.expect("nonce infallible"),
+            nonce,
         )),
     }
 }
