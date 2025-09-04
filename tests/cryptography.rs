@@ -35,10 +35,10 @@ fn test_sign_message_invalid_inputs() {
     // Test with invalid key
     let invalid_key = "not_a_valid_key";
     let message = b"Test message";
-    
+
     let result = sign_message(invalid_key, message);
     assert!(result.is_err(), "Should fail with invalid key");
-    
+
     if let Err(err) = result {
         assert!(err.to_string().contains("Failed to parse EVM secret key"));
     }
@@ -51,11 +51,11 @@ fn test_sign_message_valid() {
     // This is a testing-only key, never use in production
     let private_key = "1111111111111111111111111111111111111111111111111111111111111111";
     let message = b"Test message for signing";
-    
+
     // Sign the message
     let signature = sign_message(private_key, message);
     assert!(signature.is_ok(), "Signing should succeed with valid key");
-    
+
     let signature = signature.unwrap();
     // Verify the signature is not empty and has the correct length
     assert!(!signature.is_empty());
@@ -69,11 +69,11 @@ fn test_sign_message_reproducibility() {
     // This is a testing-only key, never use in production
     let private_key = "1111111111111111111111111111111111111111111111111111111111111111";
     let message = b"Test message";
-    
+
     // Sign the message twice
     let signature1 = sign_message(private_key, message).expect("Signing should succeed");
     let signature2 = sign_message(private_key, message).expect("Signing should succeed");
-    
+
     // Signatures should be identical for the same key and message
     assert_eq!(signature1, signature2);
 }
