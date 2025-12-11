@@ -14,13 +14,15 @@
 
 use crate::{common::Address as RewardsAddress, quoting_metrics::QuotingMetrics};
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 #[cfg(any(test, feature = "test-utils"))]
 use crate::common::Amount;
 
 #[cfg(any(test, feature = "test-utils"))]
 use std::path::PathBuf;
+
+#[cfg(any(test, feature = "test-utils"))]
+use thiserror::Error;
 
 /// Pool hash type (32 bytes) - compatible with XorName without the dependency
 pub type PoolHash = [u8; 32];
@@ -63,6 +65,7 @@ pub struct CandidateNode {
     pub metrics: QuotingMetrics,
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 /// Errors that can occur during smart contract operations
 #[derive(Debug, Error)]
 pub enum SmartContractError {
