@@ -1,7 +1,7 @@
 use crate::TX_TIMEOUT;
 use crate::common::{Address, Calldata, TxHash};
 use crate::transaction_config::{MaxFeePerGas, TransactionConfig};
-use alloy::network::{Network, TransactionBuilder};
+use alloy::network::{Network, ReceiptResponse, TransactionBuilder};
 use alloy::providers::{PendingTransactionBuilder, Provider};
 use std::time::Duration;
 
@@ -233,8 +233,49 @@ where
 
     match watch_result {
         Ok(tx_hash) => {
-            debug!("{tx_identifier} transaction with hash {tx_hash:?} is successful");
-            Ok(tx_hash)
+            // CRITICAL: .watch() only confirms the tx was mined, NOT that it succeeded.
+            // We must fetch the receipt and check the status field.
+            match provider.get_transaction_receipt(tx_hash).await {
+                Ok(Some(receipt)) => {
+                    if receipt.status() {
+                        debug!("{tx_identifier} transaction with hash {tx_hash:?} succeeded");
+                        Ok(tx_hash)
+                    } else {
+                        // Transaction was mined but reverted (e.g., out of gas)
+                        let gas_used = receipt.gas_used();
+                        error!(
+                            "{tx_identifier} transaction {tx_hash:?} was mined but reverted. \
+                            Gas used: {gas_used}"
+                        );
+                        Err(TransactionError::TransactionReverted {
+                            message: format!(
+                                "Transaction was mined but execution failed (gas used: {gas_used})"
+                            ),
+                            revert_data: None,
+                            nonce,
+                        })
+                    }
+                }
+                Ok(None) => {
+                    // This shouldn't happen after .watch() succeeds, but handle it
+                    warn!(
+                        "{tx_identifier} transaction {tx_hash:?} receipt not found after watch"
+                    );
+                    Err(TransactionError::TransactionFailedToConfirm(
+                        "Receipt not found after watch".to_string(),
+                        nonce,
+                    ))
+                }
+                Err(err) => {
+                    error!(
+                        "{tx_identifier} failed to get receipt for {tx_hash:?}: {err}"
+                    );
+                    Err(TransactionError::TransactionFailedToConfirm(
+                        format!("Failed to get receipt: {err}"),
+                        nonce,
+                    ))
+                }
+            }
         }
         Err(err) => {
             // Try to get more details about the revert if available
