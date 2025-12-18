@@ -175,12 +175,13 @@ where
         transaction_request.set_max_fee_per_gas(max_fee_per_gas);
     }
 
-    // Estimate gas and add 20% buffer to avoid out-of-gas reverts
+    // Estimate gas and add 50% buffer to avoid out-of-gas reverts
     // This is especially important for Arbitrum L2 where gas estimation can be tricky
+    // due to L1 calldata costs and variable L2 computation costs
     match provider.estimate_gas(transaction_request.clone()).await {
         Ok(estimated_gas) => {
-            let gas_with_buffer = estimated_gas.saturating_mul(120) / 100;
-            debug!("Estimated gas: {estimated_gas}, with 20% buffer: {gas_with_buffer}");
+            let gas_with_buffer = estimated_gas.saturating_mul(150) / 100;
+            debug!("Estimated gas: {estimated_gas}, with 50% buffer: {gas_with_buffer}");
             transaction_request.set_gas_limit(gas_with_buffer);
         }
         Err(e) => {
