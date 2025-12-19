@@ -259,18 +259,14 @@ where
                 }
                 Ok(None) => {
                     // This shouldn't happen after .watch() succeeds, but handle it
-                    warn!(
-                        "{tx_identifier} transaction {tx_hash:?} receipt not found after watch"
-                    );
+                    warn!("{tx_identifier} transaction {tx_hash:?} receipt not found after watch");
                     Err(TransactionError::TransactionFailedToConfirm(
                         "Receipt not found after watch".to_string(),
                         nonce,
                     ))
                 }
                 Err(err) => {
-                    error!(
-                        "{tx_identifier} failed to get receipt for {tx_hash:?}: {err}"
-                    );
+                    error!("{tx_identifier} failed to get receipt for {tx_hash:?}: {err}");
                     Err(TransactionError::TransactionFailedToConfirm(
                         format!("Failed to get receipt: {err}"),
                         nonce,
