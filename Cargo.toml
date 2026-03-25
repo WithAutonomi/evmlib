@@ -29,6 +29,3 @@ serde_json = { version = "1.0.108", optional = true }
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-[lints]
-workspace = true
