@@ -40,9 +40,11 @@ async fn setup() -> (
         Ethereum,
     >,
 ) {
-    let (node, rpc_url) = start_node();
+    let (node, rpc_url) = start_node().unwrap();
 
-    let network_token = deploy_network_token_contract(&rpc_url, &node).await;
+    let network_token = deploy_network_token_contract(&rpc_url, &node)
+        .await
+        .unwrap();
 
     (node, network_token)
 }

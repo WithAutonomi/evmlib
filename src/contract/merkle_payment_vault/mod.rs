@@ -74,10 +74,12 @@ mod tests {
     #[tokio::test]
     async fn test_smart_contract() {
         // Start local Anvil node
-        let (_anvil, rpc_url) = start_node();
+        let (_anvil, rpc_url) = start_node().unwrap();
 
         // Deploy network token
-        let network_token = deploy_network_token_contract(&rpc_url, &_anvil).await;
+        let network_token = deploy_network_token_contract(&rpc_url, &_anvil)
+            .await
+            .unwrap();
         let token_address = *network_token.contract.address();
 
         // Deploy Merkle payment vault using the same provider as network token
