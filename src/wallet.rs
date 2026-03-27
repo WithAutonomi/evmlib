@@ -536,11 +536,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_transfer_gas_tokens() {
-        let testnet = Testnet::new().await;
+        let testnet = Testnet::new().await.unwrap();
         let network = testnet.to_network();
-        let wallet =
-            Wallet::new_from_private_key(network.clone(), &testnet.default_wallet_private_key())
-                .unwrap();
+        let wallet = Wallet::new_from_private_key(
+            network.clone(),
+            &testnet.default_wallet_private_key().unwrap(),
+        )
+        .unwrap();
         let receiver_wallet = Wallet::new_with_random_wallet(network);
         let transfer_amount = Amount::from(117);
 

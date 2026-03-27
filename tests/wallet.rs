@@ -21,13 +21,18 @@ use std::ops::Mul;
 
 #[allow(clippy::unwrap_used)]
 async fn local_testnet() -> (AnvilInstance, Network, EthereumWallet) {
-    let (node, rpc_url) = start_node();
-    let network_token = deploy_network_token_contract(&rpc_url, &node).await;
+    let (node, rpc_url) = start_node().unwrap();
+    let network_token = deploy_network_token_contract(&rpc_url, &node)
+        .await
+        .unwrap();
     let payment_token_address = *network_token.contract.address();
-    let data_payments = deploy_data_payments_contract(&rpc_url, &node, payment_token_address).await;
+    let data_payments = deploy_data_payments_contract(&rpc_url, &node, payment_token_address)
+        .await
+        .unwrap();
     let merkle_payments =
         evmlib::testnet::deploy_merkle_payments_contract(&rpc_url, &node, payment_token_address)
-            .await;
+            .await
+            .unwrap();
 
     (
         node,
