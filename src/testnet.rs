@@ -22,8 +22,6 @@ use alloy::providers::fillers::{
 use alloy::providers::{Identity, ProviderBuilder, RootProvider};
 use alloy::signers::local::PrivateKeySigner;
 
-const ANVIL_DEFAULT_PORT: u16 = 61611;
-
 pub struct Testnet {
     anvil: AnvilInstance,
     rpc_url: Url,
@@ -81,13 +79,19 @@ impl Testnet {
 /// The `anvil` binary respects the `ANVIL_IP_ADDR` environment variable, but defaults to "localhost".
 pub fn start_node() -> (AnvilInstance, Url) {
     let host = std::env::var("ANVIL_IP_ADDR").unwrap_or_else(|_| "localhost".to_string());
-    let port = std::env::var("ANVIL_PORT")
-        .unwrap_or(ANVIL_DEFAULT_PORT.to_string())
-        .parse::<u16>()
-        .expect("Invalid port number");
 
-    let anvil = Anvil::new()
-        .port(port)
+    let mut builder = Anvil::new();
+
+    // Only bind to a fixed port if explicitly requested via ANVIL_PORT.
+    // By default, let the OS assign a random available port (port 0) so that
+    // multiple Anvil instances (parallel tests, sequential tests with TIME_WAIT)
+    // never collide on the same port.
+    if let Ok(port_str) = std::env::var("ANVIL_PORT") {
+        let port = port_str.parse::<u16>().expect("ANVIL_PORT must be a valid u16");
+        builder = builder.port(port);
+    }
+
+    let anvil = builder
         .try_spawn()
         .expect("Could not spawn Anvil node");
 
