@@ -29,9 +29,11 @@ extern crate tracing;
 pub mod common;
 pub mod contract;
 pub mod cryptography;
+pub mod data_payments;
 #[cfg(feature = "external-signer")]
 pub mod external_signer;
 pub mod merkle_batch_payment;
+pub mod merkle_payments;
 pub mod quoting_metrics;
 mod retry;
 pub mod testnet;
@@ -41,6 +43,10 @@ pub mod wallet;
 
 // Re-export GasInfo for use by other crates
 pub use retry::GasInfo;
+
+// Re-export payment types for convenience (replaces ant-evm)
+pub use common::Address as RewardsAddress;
+pub use data_payments::{EncodedPeerId, PaymentQuote, ProofOfPayment};
 
 /// Timeout for transactions
 const TX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(24); // Should differ per chain
