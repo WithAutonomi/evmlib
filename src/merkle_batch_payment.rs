@@ -17,13 +17,13 @@ use crate::contract::data_type_conversion;
 use crate::quoting_metrics::QuotingMetrics;
 use serde::{Deserialize, Serialize};
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(test)]
 use crate::common::Amount;
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(test)]
 use std::path::PathBuf;
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(test)]
 use thiserror::Error;
 
 /// Error returned when `total_cost_unit` exceeds the 248-bit limit during packing.
@@ -214,7 +214,7 @@ impl PoolCommitment {
     }
 }
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(test)]
 /// Errors that can occur during smart contract operations
 #[derive(Debug, Error)]
 pub enum SmartContractError {
@@ -251,7 +251,7 @@ pub struct OnChainPaymentInfo {
     pub paid_node_addresses: Vec<(RewardsAddress, usize)>,
 }
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(test)]
 /// Disk-based Merkle payment contract (mock for testing)
 ///
 /// This simulates smart contract behavior by storing payment data to disk.
@@ -260,7 +260,7 @@ pub struct DiskMerklePaymentContract {
     storage_path: PathBuf, // ~/.autonomi/merkle_payments/
 }
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(test)]
 impl DiskMerklePaymentContract {
     /// Create a new contract with a specific storage path
     pub fn new_with_path(storage_path: PathBuf) -> Result<Self, SmartContractError> {
