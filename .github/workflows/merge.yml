@@ -81,6 +81,9 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Install Foundry (anvil)
+        uses: foundry-rs/foundry-toolchain@v1
+
       - name: Run tests
         run: cargo test --release
 
