@@ -196,22 +196,47 @@ mod tests {
             "Should have paid nodes"
         );
 
-        // Test 4: Try to pay again for the same tree (should fail with PaymentAlreadyExists)
+        // Test 4: Try to pay again with the same pools.
+        //
+        // The contract picks a winner from submitted pools using block.prevrandao.
+        // With 4 pools, the second call may select a different winner (different block),
+        // which is valid — only the SAME pool hash should be rejected as duplicate.
         println!("\nTest 4: Testing duplicate payment detection...");
-        let pool_commitments_packed: Vec<_> = pool_commitments
+        let all_packed: Vec<_> = pool_commitments
             .iter()
             .map(|c| c.to_packed().expect("cost unit packing"))
             .collect();
         let duplicate_result = vault_handler
-            .pay_for_merkle_tree(depth, pool_commitments_packed, timestamp, &tx_config)
+            .pay_for_merkle_tree(depth, all_packed, timestamp, &tx_config)
             .await;
 
-        match duplicate_result {
+        // The contract selects a winner using block.prevrandao, so it may pick a different
+        // pool than the first call. If it picks the same winner, we get PaymentAlreadyExists.
+        // If it picks a different winner, it succeeds (paying for a new pool is valid).
+        // Both outcomes are correct behavior — the important thing is that the SAME pool
+        // hash can't be paid twice.
+        match &duplicate_result {
             Err(error::Error::PaymentAlreadyExists(_)) => {
-                println!("Correctly detected duplicate payment!");
+                println!("Correctly detected duplicate payment (same winner selected)!");
             }
-            Err(e) => panic!("Expected PaymentAlreadyExists error, got: {e:?}"),
-            Ok(_) => panic!("Should not allow duplicate payment"),
+            Ok((new_winner, _, _)) => {
+                println!(
+                    "Different winner selected: {} (original: {})",
+                    hex::encode(new_winner),
+                    hex::encode(winner_pool_hash)
+                );
+                assert_ne!(
+                    *new_winner, winner_pool_hash,
+                    "Same winner should have been rejected as duplicate"
+                );
+                // Verify original payment still exists
+                let original_info = vault_handler
+                    .get_payment_info(winner_pool_hash)
+                    .await
+                    .expect("Original payment should still exist");
+                assert_eq!(original_info.depth, depth);
+            }
+            Err(e) => panic!("Unexpected error: {e:?}"),
         }
 
         println!("\n✅ All tests passed!");

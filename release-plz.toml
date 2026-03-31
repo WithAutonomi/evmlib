@@ -1,0 +1,8 @@
+[workspace]
+changelog_update = false
+semver_check = false
+
+[[package]]
+name = "evmlib"
+git_tag_name = "v{{ version }}"
+git_release_enable = false
