@@ -35,9 +35,9 @@ pub const MAX_MERKLE_DEPTH: u8 = 8;
 
 /// Calculate expected number of reward pools for a given tree depth
 ///
-/// Formula: 2^floor(depth/2)
+/// Formula: 2^ceil(depth/2) — must match `MerklePaymentLib.expectedRewardPools` in Solidity
 pub fn expected_reward_pools(depth: u8) -> usize {
-    let half_depth = depth / 2;
+    let half_depth = depth.div_ceil(2);
     1 << half_depth
 }
 
@@ -261,9 +261,9 @@ mod tests {
 
     #[test]
     fn test_expected_reward_pools() {
-        assert_eq!(expected_reward_pools(1), 1);
+        assert_eq!(expected_reward_pools(1), 2);
         assert_eq!(expected_reward_pools(2), 2);
-        assert_eq!(expected_reward_pools(3), 2);
+        assert_eq!(expected_reward_pools(3), 4);
         assert_eq!(expected_reward_pools(4), 4);
         assert_eq!(expected_reward_pools(8), 16);
     }

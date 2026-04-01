@@ -373,7 +373,7 @@ pub fn midpoint_proof_depth(depth: u8) -> u8 {
 }
 
 fn midpoint_level(depth: u8) -> usize {
-    (depth / 2) as usize
+    depth.div_ceil(2) as usize
 }
 
 /// Errors for Merkle proof verification.
