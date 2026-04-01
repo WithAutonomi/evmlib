@@ -73,7 +73,7 @@ const ARBITRUM_ONE_PAYMENT_VAULT_ADDRESS: Address =
 
 /// Unified payment vault address on Arbitrum Sepolia (proxy contract).
 const ARBITRUM_SEPOLIA_TEST_PAYMENT_VAULT_ADDRESS: Address =
-    address!("4d90fa0a3f165476128aa94e5bc7250f57fd94e5");
+    address!("d742E8CFEf27A9a884F3EFfA239Ee2F39c276522");
 
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
