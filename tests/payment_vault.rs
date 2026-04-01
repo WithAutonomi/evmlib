@@ -13,15 +13,12 @@ use alloy::providers::fillers::{
 };
 use alloy::providers::{Identity, ProviderBuilder, RootProvider, WalletProvider};
 use alloy::signers::local::{LocalSigner, PrivateKeySigner};
-use evmlib::Network;
 use evmlib::common::U256;
 use evmlib::contract::network_token::NetworkToken;
+use evmlib::contract::payment_vault::MAX_TRANSFERS_PER_TRANSACTION;
 use evmlib::contract::payment_vault::handler::PaymentVaultHandler;
-use evmlib::contract::payment_vault::{MAX_TRANSFERS_PER_TRANSACTION, interface};
-use evmlib::quoting_metrics::QuotingMetrics;
-use evmlib::testnet::{deploy_data_payments_contract, deploy_network_token_contract, start_node};
+use evmlib::testnet::{deploy_network_token_contract, deploy_payment_vault_contract, start_node};
 use evmlib::transaction_config::TransactionConfig;
-use evmlib::utils::http_provider;
 use evmlib::wallet::wallet_address;
 
 async fn setup() -> (
@@ -73,12 +70,12 @@ async fn setup() -> (
         .await
         .unwrap();
 
-    let data_payments =
-        deploy_data_payments_contract(&rpc_url, &node, *network_token.contract.address())
+    let payment_vault =
+        deploy_payment_vault_contract(&rpc_url, &node, *network_token.contract.address())
             .await
             .unwrap();
 
-    (node, network_token, data_payments)
+    (node, network_token, payment_vault)
 }
 
 #[allow(clippy::unwrap_used)]
@@ -127,32 +124,6 @@ async fn test_deploy() {
 }
 
 #[tokio::test]
-async fn test_get_quote_on_arb_sepolia() {
-    let network = Network::ArbitrumSepoliaTest;
-    let provider = http_provider(network.rpc_url().clone());
-    let payment_vault = PaymentVaultHandler::new(*network.data_payments_address(), provider);
-
-    let quoting_metrics = QuotingMetrics {
-        data_type: 1, // a GraphEntry record
-        data_size: 100,
-        close_records_stored: 10,
-        records_per_type: vec![(0, 5), (1, 5)],
-        max_records: 16 * 1024,
-        received_payment_count: 0,
-        live_time: 1400,
-        network_density: Some([
-            4, 4, 224, 228, 247, 252, 14, 44, 67, 21, 153, 47, 244, 18, 232, 1, 152, 195, 44, 43,
-            29, 135, 19, 217, 240, 129, 64, 245, 240, 227, 129, 162,
-        ]),
-        network_size: Some(240),
-    };
-
-    let result = payment_vault.get_quote(vec![quoting_metrics]).await;
-
-    assert!(result.is_ok(), "Failed with error: {:?}", result.err());
-}
-
-#[tokio::test]
 async fn test_pay_for_quotes_on_local() {
     let (_anvil, network_token, mut payment_vault) = setup().await;
 
@@ -183,66 +154,4 @@ async fn test_pay_for_quotes_on_local() {
         .await;
 
     assert!(result.is_ok(), "Failed with error: {:?}", result.err());
-}
-
-#[tokio::test]
-async fn test_verify_payment_on_local() {
-    let (_anvil, network_token, mut payment_vault) = setup().await;
-
-    let transaction_config = TransactionConfig::default();
-
-    let mut quote_payments = vec![];
-
-    for _ in 0..5 {
-        let quote_payment = random_quote_payment();
-        quote_payments.push(quote_payment);
-    }
-
-    let _ = network_token
-        .approve(
-            *payment_vault.contract.address(),
-            U256::MAX,
-            &transaction_config,
-        )
-        .await
-        .unwrap();
-
-    // Contract provider has a different account coupled to it,
-    // so we set it to the same as the network token contract
-    payment_vault.set_provider(network_token.contract.provider().clone());
-
-    let result = payment_vault
-        .pay_for_quotes(quote_payments.clone(), &transaction_config)
-        .await;
-
-    assert!(result.is_ok(), "Failed with error: {:?}", result.err());
-
-    let payment_verifications: Vec<_> = quote_payments
-        .into_iter()
-        .map(|v| interface::IPaymentVault::PaymentVerification {
-            metrics: QuotingMetrics {
-                data_size: 0,
-                data_type: 0,
-                close_records_stored: 0,
-                records_per_type: vec![],
-                max_records: 0,
-                received_payment_count: 0,
-                live_time: 0,
-                network_density: None,
-                network_size: None,
-            }
-            .into(),
-            rewardsAddress: v.1,
-            quoteHash: v.0,
-        })
-        .collect();
-
-    let results = payment_vault
-        .verify_payment(payment_verifications)
-        .await
-        .expect("Verify payment failed");
-
-    for result in results {
-        assert!(result.isValid);
-    }
 }

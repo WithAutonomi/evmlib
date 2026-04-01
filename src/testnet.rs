@@ -10,9 +10,8 @@ use std::env;
 use std::num::ParseIntError;
 
 use crate::common::Address;
-use crate::contract::merkle_payment_vault::handler::MerklePaymentVaultHandler;
 use crate::contract::payment_vault::handler::PaymentVaultHandler;
-use crate::contract::{merkle_payment_vault, network_token::NetworkToken, payment_vault};
+use crate::contract::{network_token::NetworkToken, payment_vault};
 use crate::reqwest::Url;
 use crate::{CustomNetwork, Network};
 use alloy::hex::ToHexExt;
@@ -41,29 +40,24 @@ pub struct Testnet {
     anvil: AnvilInstance,
     rpc_url: Url,
     network_token_address: Address,
-    data_payments_address: Address,
-    merkle_payments_address: Address,
+    payment_vault_address: Address,
 }
 
 impl Testnet {
-    /// Starts an Anvil node and automatically deploys the network token and chunk payments smart contracts.
+    /// Starts an Anvil node and automatically deploys the network token and unified payment vault contracts.
     pub async fn new() -> Result<Self, TestnetError> {
         let (node, rpc_url) = start_node()?;
 
         let network_token = deploy_network_token_contract(&rpc_url, &node).await?;
-        let data_payments =
-            deploy_data_payments_contract(&rpc_url, &node, *network_token.contract.address())
-                .await?;
-        let merkle_payments =
-            deploy_merkle_payments_contract(&rpc_url, &node, *network_token.contract.address())
+        let payment_vault =
+            deploy_payment_vault_contract(&rpc_url, &node, *network_token.contract.address())
                 .await?;
 
         Ok(Testnet {
             anvil: node,
             rpc_url,
             network_token_address: *network_token.contract.address(),
-            data_payments_address: *data_payments.contract.address(),
-            merkle_payments_address: *merkle_payments.contract.address(),
+            payment_vault_address: *payment_vault.contract.address(),
         })
     }
 
@@ -71,8 +65,7 @@ impl Testnet {
         Network::Custom(CustomNetwork {
             rpc_url_http: self.rpc_url.clone(),
             payment_token_address: self.network_token_address,
-            data_payments_address: self.data_payments_address,
-            merkle_payments_address: Some(self.merkle_payments_address),
+            payment_vault_address: self.payment_vault_address,
         })
     }
 
@@ -87,8 +80,8 @@ impl Testnet {
         Ok(signer.to_bytes().encode_hex_with_prefix())
     }
 
-    pub fn merkle_payments_address(&self) -> Address {
-        self.merkle_payments_address
+    pub fn payment_vault_address(&self) -> Address {
+        self.payment_vault_address
     }
 }
 
@@ -164,7 +157,7 @@ pub async fn deploy_network_token_contract(
     Ok(NetworkToken::deploy(provider).await)
 }
 
-pub async fn deploy_data_payments_contract(
+pub async fn deploy_payment_vault_contract(
     rpc_url: &Url,
     anvil: &AnvilInstance,
     token_address: Address,
@@ -201,61 +194,13 @@ pub async fn deploy_data_payments_contract(
         .wallet(wallet)
         .connect_http(rpc_url.clone());
 
-    // Deploy the contract.
+    // Deploy the unified payment vault contract.
     let payment_vault_contract_address =
         payment_vault::implementation::deploy(&provider, token_address).await;
 
     // Create a handler for the deployed contract
     Ok(PaymentVaultHandler::new(
         payment_vault_contract_address,
-        provider,
-    ))
-}
-
-pub async fn deploy_merkle_payments_contract(
-    rpc_url: &Url,
-    anvil: &AnvilInstance,
-    token_address: Address,
-) -> Result<
-    MerklePaymentVaultHandler<
-        FillProvider<
-            JoinFill<
-                JoinFill<
-                    JoinFill<
-                        Identity,
-                        JoinFill<
-                            GasFiller,
-                            JoinFill<BlobGasFiller, JoinFill<NonceFiller, ChainIdFiller>>,
-                        >,
-                    >,
-                    NonceFiller<SimpleNonceManager>,
-                >,
-                WalletFiller<EthereumWallet>,
-            >,
-            RootProvider,
-            Ethereum,
-        >,
-        Ethereum,
-    >,
-    TestnetError,
-> {
-    // Set up signer from the third default Anvil account (Charlie).
-    let key = anvil.keys().get(2).ok_or(TestnetError::MissingKey(2))?;
-    let signer: PrivateKeySigner = key.clone().into();
-    let wallet = EthereumWallet::from(signer);
-
-    let provider = ProviderBuilder::new()
-        .with_simple_nonce_management()
-        .wallet(wallet)
-        .connect_http(rpc_url.clone());
-
-    // Deploy the contract.
-    let merkle_payment_vault_contract_address =
-        merkle_payment_vault::implementation::deploy(&provider, token_address).await;
-
-    // Create a handler for the deployed contract
-    Ok(MerklePaymentVaultHandler::new(
-        merkle_payment_vault_contract_address,
         provider,
     ))
 }

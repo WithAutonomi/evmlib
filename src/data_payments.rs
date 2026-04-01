@@ -11,9 +11,8 @@
 //! Defines [`EncodedPeerId`], [`PaymentQuote`], and [`ProofOfPayment`] used
 //! in the EVM payment verification flow.
 
-use crate::common::{Address as RewardsAddress, QuoteHash};
+use crate::common::{Address as RewardsAddress, Amount, QuoteHash};
 use crate::cryptography::hash as crypto_hash;
-use crate::quoting_metrics::QuotingMetrics;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::time::SystemTime;
@@ -58,11 +57,11 @@ pub struct ProofOfPayment {
 
 impl ProofOfPayment {
     /// Returns a short digest of the proof of payment to use for on-chain verification.
-    pub fn digest(&self) -> Vec<(QuoteHash, QuotingMetrics, RewardsAddress)> {
+    pub fn digest(&self) -> Vec<(QuoteHash, Amount, RewardsAddress)> {
         self.peer_quotes
             .clone()
             .into_iter()
-            .map(|(_, quote)| (quote.hash(), quote.quoting_metrics, quote.rewards_address))
+            .map(|(_, quote)| (quote.hash(), quote.price, quote.rewards_address))
             .collect()
     }
 }
@@ -78,8 +77,8 @@ pub struct PaymentQuote {
     pub content: XorName,
     /// The local node time when the quote was created
     pub timestamp: SystemTime,
-    /// Quoting metrics being used to generate this quote
-    pub quoting_metrics: QuotingMetrics,
+    /// The node-calculated price for storing this content
+    pub price: Amount,
     /// The node's wallet address
     pub rewards_address: RewardsAddress,
     /// The node's public key in bytes (ML-DSA-65)
@@ -93,7 +92,7 @@ impl fmt::Debug for PaymentQuote {
         f.debug_struct("PaymentQuote")
             .field("content", &self.content)
             .field("timestamp", &self.timestamp)
-            .field("quoting_metrics", &self.quoting_metrics)
+            .field("price", &self.price)
             .field("rewards_address", &self.rewards_address)
             .finish_non_exhaustive()
     }
@@ -112,7 +111,7 @@ impl PaymentQuote {
     pub fn bytes_for_signing(
         xorname: XorName,
         timestamp: SystemTime,
-        quoting_metrics: &QuotingMetrics,
+        price: &Amount,
         rewards_address: &RewardsAddress,
     ) -> Vec<u8> {
         let mut bytes = xorname.to_vec();
@@ -121,8 +120,7 @@ impl PaymentQuote {
             .unwrap_or_default()
             .as_secs();
         bytes.extend_from_slice(&secs.to_le_bytes());
-        let serialised_quoting_metrics = rmp_serde::to_vec(quoting_metrics).unwrap_or_default();
-        bytes.extend_from_slice(&serialised_quoting_metrics);
+        bytes.extend_from_slice(&price.to_le_bytes::<32>());
         bytes.extend_from_slice(rewards_address.as_slice());
         bytes
     }
@@ -132,7 +130,7 @@ impl PaymentQuote {
         Self::bytes_for_signing(
             self.content,
             self.timestamp,
-            &self.quoting_metrics,
+            &self.price,
             &self.rewards_address,
         )
     }

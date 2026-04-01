@@ -1,7 +1,5 @@
-use crate::common::{Address, Amount, QuoteHash, U256};
-use crate::contract::data_type_conversion;
-use crate::quoting_metrics::QuotingMetrics;
-use alloy::primitives::FixedBytes;
+use crate::common::{Address, Amount, QuoteHash};
+use crate::merkle_batch_payment::CANDIDATES_PER_POOL;
 use alloy::sol;
 
 sol!(
@@ -9,18 +7,11 @@ sol!(
     #[derive(Debug)]
     #[sol(rpc)]
     IPaymentVault,
-    "abi/IPaymentVaultV6.json"
+    "abi/IPaymentVault.json"
 );
 
-impl From<(QuoteHash, QuotingMetrics, Address)> for IPaymentVault::PaymentVerification {
-    fn from(value: (QuoteHash, QuotingMetrics, Address)) -> Self {
-        Self {
-            metrics: value.1.into(),
-            rewardsAddress: value.2,
-            quoteHash: value.0,
-        }
-    }
-}
+// Re-export PoolHash
+pub use crate::merkle_batch_payment::PoolHash;
 
 impl From<(QuoteHash, Address, Amount)> for IPaymentVault::DataPayment {
     fn from(value: (QuoteHash, Address, Amount)) -> Self {
@@ -32,26 +23,22 @@ impl From<(QuoteHash, Address, Amount)> for IPaymentVault::DataPayment {
     }
 }
 
-impl From<QuotingMetrics> for IPaymentVault::QuotingMetrics {
-    fn from(value: QuotingMetrics) -> Self {
+impl From<crate::merkle_batch_payment::PoolCommitment> for IPaymentVault::PoolCommitment {
+    fn from(pool: crate::merkle_batch_payment::PoolCommitment) -> Self {
+        let candidates_array: [IPaymentVault::CandidateNode; CANDIDATES_PER_POOL] =
+            pool.candidates.map(|c| c.into());
         Self {
-            dataType: data_type_conversion(value.data_type),
-            dataSize: U256::from(value.data_size),
-            closeRecordsStored: U256::from(value.close_records_stored),
-            recordsPerType: value
-                .records_per_type
-                .into_iter()
-                .map(|(data_type, amount)| IPaymentVault::Record {
-                    dataType: data_type_conversion(data_type),
-                    records: U256::from(amount),
-                })
-                .collect(),
-            maxRecords: U256::from(value.max_records),
-            receivedPaymentCount: U256::from(value.received_payment_count),
-            liveTime: U256::from(value.live_time),
-            networkDensity: FixedBytes::<32>::from(value.network_density.unwrap_or_default())
-                .into(),
-            networkSize: value.network_size.map(U256::from).unwrap_or_default(),
+            poolHash: pool.pool_hash.into(),
+            candidates: candidates_array,
+        }
+    }
+}
+
+impl From<crate::merkle_batch_payment::CandidateNode> for IPaymentVault::CandidateNode {
+    fn from(node: crate::merkle_batch_payment::CandidateNode) -> Self {
+        Self {
+            rewardsAddress: node.rewards_address,
+            amount: node.price, // our internal "price" maps to contract's "amount"
         }
     }
 }

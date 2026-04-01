@@ -2,13 +2,8 @@
 //
 // This SAFE Network Software is licensed to you under The General Public License (GPL), version 3.
 
-use crate::common::Address as RewardsAddress;
-use crate::contract::data_type_conversion;
-use crate::merkle_batch_payment::{
-    CANDIDATES_PER_POOL, CandidateNode, CostUnitOverflow, PoolCommitment, PoolCommitmentPacked,
-    PoolHash, calculate_total_cost_unit, encode_data_type_and_cost,
-};
-use crate::quoting_metrics::QuotingMetrics;
+use crate::common::{Address as RewardsAddress, Amount};
+use crate::merkle_batch_payment::{CANDIDATES_PER_POOL, CandidateNode, PoolCommitment, PoolHash};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use thiserror::Error;
@@ -35,12 +30,6 @@ pub enum MerklePaymentVerificationError {
         expected: u32,
         got: u32,
     },
-    #[error("Data size mismatch for node {address}: expected {expected}, got {got}")]
-    DataSizeMismatch {
-        address: RewardsAddress,
-        expected: usize,
-        got: usize,
-    },
     #[error("Commitment does not match pool")]
     CommitmentDoesNotMatchPool,
     #[error("Paid node index {index} out of bounds (pool size: {pool_size})")]
@@ -51,18 +40,16 @@ pub enum MerklePaymentVerificationError {
         expected: RewardsAddress,
         got: RewardsAddress,
     },
-    #[error("Winner pool hash not found in on-chain packed commitments")]
+    #[error("Winner pool hash not found in on-chain commitments")]
     WinnerPoolNotInCommitments,
     #[error(
-        "Cost unit mismatch at index {index}: on_chain={on_chain_packed}, expected={expected_packed}"
+        "Price mismatch at index {index}: on_chain={on_chain_price}, expected={expected_price}"
     )]
-    CostUnitMismatch {
+    PriceMismatch {
         index: usize,
-        on_chain_packed: String,
-        expected_packed: String,
+        on_chain_price: String,
+        expected_price: String,
     },
-    #[error("Cost unit overflow during packing: {0}")]
-    CostUnitOverflow(#[from] CostUnitOverflow),
 }
 
 /// A node's signed quote for potential reward eligibility.
@@ -75,8 +62,8 @@ pub struct MerklePaymentCandidateNode {
     /// Node's public key bytes (ML-DSA-65)
     pub pub_key: Vec<u8>,
 
-    /// Node's storage metrics at quote time
-    pub quoting_metrics: QuotingMetrics,
+    /// Node-calculated price for storing data
+    pub price: Amount,
 
     /// Node's Ethereum address for payment
     pub reward_address: RewardsAddress,
@@ -84,19 +71,19 @@ pub struct MerklePaymentCandidateNode {
     /// Quote timestamp (provided by the client)
     pub merkle_payment_timestamp: u64,
 
-    /// Signature over hash(quoting_metrics || reward_address || timestamp)
+    /// Signature over hash(price || reward_address || timestamp)
     pub signature: Vec<u8>,
 }
 
 impl MerklePaymentCandidateNode {
     /// Get the bytes to sign.
     pub fn bytes_to_sign(
-        quoting_metrics: &QuotingMetrics,
+        price: &Amount,
         reward_address: &RewardsAddress,
         timestamp: u64,
     ) -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(&quoting_metrics.to_bytes());
+        bytes.extend_from_slice(&price.to_le_bytes::<32>());
         bytes.extend_from_slice(reward_address.as_slice());
         bytes.extend_from_slice(&timestamp.to_le_bytes());
         bytes
@@ -106,7 +93,7 @@ impl MerklePaymentCandidateNode {
     pub(crate) fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&self.pub_key);
-        bytes.extend_from_slice(&self.quoting_metrics.to_bytes());
+        bytes.extend_from_slice(&self.price.to_le_bytes::<32>());
         bytes.extend_from_slice(self.reward_address.as_slice());
         bytes.extend_from_slice(&self.merkle_payment_timestamp.to_le_bytes());
         bytes.extend_from_slice(&self.signature);
@@ -150,7 +137,7 @@ impl MerklePaymentCandidatePool {
         let candidates: [CandidateNode; CANDIDATES_PER_POOL] =
             self.candidate_nodes.clone().map(|node| CandidateNode {
                 rewards_address: node.reward_address,
-                metrics: node.quoting_metrics.clone(),
+                price: node.price,
             });
 
         PoolCommitment {
@@ -159,15 +146,10 @@ impl MerklePaymentCandidatePool {
         }
     }
 
-    /// Convert to packed commitment for compact calldata (v2).
-    pub fn to_commitment_packed(&self) -> Result<PoolCommitmentPacked, CostUnitOverflow> {
-        self.to_commitment().to_packed()
-    }
-
-    /// Verify that on-chain cost units match what the signed metrics produce.
-    pub fn verify_cost_units(
+    /// Verify that on-chain prices match what the signed nodes report.
+    pub fn verify_prices(
         &self,
-        on_chain_commitments: &[PoolCommitmentPacked],
+        on_chain_commitments: &[PoolCommitment],
         winner_pool_hash: &PoolHash,
     ) -> Result<(), MerklePaymentVerificationError> {
         let on_chain_winner = on_chain_commitments
@@ -181,16 +163,11 @@ impl MerklePaymentCandidatePool {
             .zip(self.candidate_nodes.iter())
             .enumerate()
         {
-            let expected_data_type = data_type_conversion(signed_node.quoting_metrics.data_type);
-            let expected_cost_unit = calculate_total_cost_unit(&signed_node.quoting_metrics);
-            let expected_packed =
-                encode_data_type_and_cost(expected_data_type, expected_cost_unit)?;
-
-            if on_chain_candidate.data_type_and_total_cost_unit != expected_packed {
-                return Err(MerklePaymentVerificationError::CostUnitMismatch {
+            if on_chain_candidate.price != signed_node.price {
+                return Err(MerklePaymentVerificationError::PriceMismatch {
                     index: i,
-                    on_chain_packed: on_chain_candidate.data_type_and_total_cost_unit.to_string(),
-                    expected_packed: expected_packed.to_string(),
+                    on_chain_price: on_chain_candidate.price.to_string(),
+                    expected_price: signed_node.price.to_string(),
                 });
             }
         }

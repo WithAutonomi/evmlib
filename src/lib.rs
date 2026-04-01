@@ -12,10 +12,8 @@
 #![allow(clippy::enum_variant_names)]
 
 use crate::common::{Address, Amount};
-use crate::contract::merkle_payment_vault::error::Error as MerklePaymentError;
-use crate::contract::merkle_payment_vault::handler::MerklePaymentVaultHandler;
 use crate::merkle_batch_payment::PoolCommitment;
-use crate::utils::{get_evm_network, http_provider};
+use crate::utils::get_evm_network;
 use alloy::primitives::address;
 use alloy::transports::http::reqwest;
 use serde::{Deserialize, Serialize};
@@ -69,17 +67,13 @@ const ARBITRUM_ONE_PAYMENT_TOKEN_ADDRESS: Address =
 const ARBITRUM_SEPOLIA_TEST_PAYMENT_TOKEN_ADDRESS: Address =
     address!("4bc1aCE0E66170375462cB4E6Af42Ad4D5EC689C");
 
-const ARBITRUM_ONE_DATA_PAYMENTS_ADDRESS: Address =
+/// Unified payment vault address (handles both single-node and merkle payments).
+const ARBITRUM_ONE_PAYMENT_VAULT_ADDRESS: Address =
     address!("B1b5219f8Aaa18037A2506626Dd0406a46f70BcC");
 
-const ARBITRUM_SEPOLIA_TEST_DATA_PAYMENTS_ADDRESS: Address =
-    address!("7f0842a78f7d4085d975ba91d630d680f91b1295");
-
-const ARBITRUM_ONE_MERKLE_PAYMENTS_ADDRESS: Address =
-    address!("0x8c20E9A6e5e2aA038Ed463460E412B669fE712Aa");
-
-const ARBITRUM_SEPOLIA_TEST_MERKLE_PAYMENTS_ADDRESS: Address =
-    address!("0x393F6825C248a29295A7f9Bfa03e475decb44dc0");
+/// Unified payment vault address on Arbitrum Sepolia (proxy contract).
+const ARBITRUM_SEPOLIA_TEST_PAYMENT_VAULT_ADDRESS: Address =
+    address!("4d90fa0a3f165476128aa94e5bc7250f57fd94e5");
 
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -87,25 +81,18 @@ pub struct CustomNetwork {
     #[serde_as(as = "DisplayFromStr")]
     pub rpc_url_http: reqwest::Url,
     pub payment_token_address: Address,
-    pub data_payments_address: Address,
-    pub merkle_payments_address: Option<Address>,
+    /// Unified payment vault handling both single-node and merkle payments.
+    pub payment_vault_address: Address,
 }
 
 impl CustomNetwork {
-    pub fn new(
-        rpc_url: &str,
-        payment_token_addr: &str,
-        data_payments_addr: &str,
-        merkle_payments_addr: Option<&str>,
-    ) -> Self {
+    pub fn new(rpc_url: &str, payment_token_addr: &str, payment_vault_addr: &str) -> Self {
         Self {
             rpc_url_http: reqwest::Url::parse(rpc_url).expect("Invalid RPC URL"),
             payment_token_address: Address::from_str(payment_token_addr)
                 .expect("Invalid payment token address"),
-            data_payments_address: Address::from_str(data_payments_addr)
-                .expect("Invalid chunk payments address"),
-            merkle_payments_address: merkle_payments_addr
-                .map(|addr| Address::from_str(addr).expect("Invalid merkle payments address")),
+            payment_vault_address: Address::from_str(payment_vault_addr)
+                .expect("Invalid payment vault address"),
         }
     }
 }
@@ -147,17 +134,11 @@ impl Network {
         })
     }
 
-    pub fn new_custom(
-        rpc_url: &str,
-        payment_token_addr: &str,
-        chunk_payments_addr: &str,
-        merkle_payments_addr: Option<&str>,
-    ) -> Self {
+    pub fn new_custom(rpc_url: &str, payment_token_addr: &str, payment_vault_addr: &str) -> Self {
         Self::Custom(CustomNetwork::new(
             rpc_url,
             payment_token_addr,
-            chunk_payments_addr,
-            merkle_payments_addr,
+            payment_vault_addr,
         ))
     }
 
@@ -185,59 +166,47 @@ impl Network {
         }
     }
 
-    pub fn data_payments_address(&self) -> &Address {
+    /// Unified payment vault address (handles both single-node and merkle payments).
+    pub fn payment_vault_address(&self) -> &Address {
         match self {
-            Network::ArbitrumOne => &ARBITRUM_ONE_DATA_PAYMENTS_ADDRESS,
-            Network::ArbitrumSepoliaTest => &ARBITRUM_SEPOLIA_TEST_DATA_PAYMENTS_ADDRESS,
-            Network::Custom(custom) => &custom.data_payments_address,
+            Network::ArbitrumOne => &ARBITRUM_ONE_PAYMENT_VAULT_ADDRESS,
+            Network::ArbitrumSepoliaTest => &ARBITRUM_SEPOLIA_TEST_PAYMENT_VAULT_ADDRESS,
+            Network::Custom(custom) => &custom.payment_vault_address,
         }
     }
 
-    pub fn merkle_payments_address(&self) -> Option<&Address> {
-        match self {
-            Network::ArbitrumOne => Some(&ARBITRUM_ONE_MERKLE_PAYMENTS_ADDRESS),
-            Network::ArbitrumSepoliaTest => Some(&ARBITRUM_SEPOLIA_TEST_MERKLE_PAYMENTS_ADDRESS),
-            Network::Custom(custom) => custom.merkle_payments_address.as_ref(),
-        }
-    }
-
-    /// Estimate the cost of a Merkle tree batch using smart contract view function (0 gas).
+    /// Estimate the cost of a Merkle tree batch locally.
     ///
-    /// This calls the smart contract's view function which runs the exact same
-    /// pricing logic as the actual payment, ensuring accurate cost estimation.
-    /// No wallet is needed since view functions don't require signing.
+    /// Computes a conservative upper-bound by summing the top `depth` candidate
+    /// prices from each pool and returning the maximum. No on-chain call is made.
     ///
     /// # Arguments
     /// * `depth` - The Merkle tree depth
-    /// * `pool_commitments` - Vector of pool commitments with metrics (one per reward pool)
-    /// * `merkle_payment_timestamp` - Unix timestamp for the payment
+    /// * `pool_commitments` - Vector of pool commitments with prices (one per reward pool)
     ///
     /// # Returns
     /// * Estimated total cost in AttoTokens
-    pub async fn estimate_merkle_payment_cost(
+    pub fn estimate_merkle_payment_cost(
         &self,
         depth: u8,
         pool_commitments: &[PoolCommitment],
-        merkle_payment_timestamp: u64,
-    ) -> Result<Amount, MerklePaymentError> {
+    ) -> Amount {
         if pool_commitments.is_empty() {
-            return Ok(Amount::ZERO);
+            return Amount::ZERO;
         }
 
-        // Create provider (no wallet needed for view calls)
-        let provider = http_provider(self.rpc_url().clone());
-
-        // Get Merkle payment vault address
-        let merkle_vault_address = *self
-            .merkle_payments_address()
-            .ok_or(MerklePaymentError::MerklePaymentsAddressNotConfigured)?;
-
-        // Create handler and call the contract's view function
-        let handler = MerklePaymentVaultHandler::new(merkle_vault_address, provider);
-        let total_amount = handler
-            .estimate_merkle_tree_cost(depth, pool_commitments.to_vec(), merkle_payment_timestamp)
-            .await?;
-
-        Ok(total_amount)
+        let depth_usize = usize::from(depth);
+        pool_commitments
+            .iter()
+            .map(|pool| {
+                let mut prices: Vec<Amount> = pool.candidates.iter().map(|c| c.price).collect();
+                prices.sort_unstable_by(|a, b| b.cmp(a)); // descending
+                prices
+                    .iter()
+                    .take(depth_usize)
+                    .fold(Amount::ZERO, |acc, p| acc + p)
+            })
+            .max()
+            .unwrap_or(Amount::ZERO)
     }
 }

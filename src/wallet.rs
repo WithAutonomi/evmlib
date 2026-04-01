@@ -7,14 +7,11 @@
 // permissions and limitations relating to use of the SAFE Network Software.
 
 use crate::common::{Address, Amount, QuoteHash, QuotePayment, TxHash, U256};
-use crate::contract::merkle_payment_vault::error::Error as MerkleHandlerError;
-use crate::contract::merkle_payment_vault::handler::MerklePaymentVaultHandler;
-use crate::contract::merkle_payment_vault::interface::PoolHash;
 use crate::contract::network_token::NetworkToken;
 use crate::contract::payment_vault::MAX_TRANSFERS_PER_TRANSACTION;
 use crate::contract::payment_vault::handler::PaymentVaultHandler;
 use crate::contract::{network_token, payment_vault};
-use crate::merkle_batch_payment::{CostUnitOverflow, PoolCommitment};
+use crate::merkle_batch_payment::{PoolCommitment, PoolHash};
 use crate::retry::GasInfo;
 use crate::transaction_config::TransactionConfig;
 use crate::utils::http_provider;
@@ -43,12 +40,8 @@ pub enum Error {
     RpcError(#[from] RpcError<TransportErrorKind>),
     #[error("Network token contract error: {0}")]
     NetworkTokenContract(#[from] network_token::Error),
-    #[error("Chunk payments contract error: {0}")]
-    ChunkPaymentsContract(#[from] payment_vault::error::Error),
-    #[error("Merkle payment vault contract error: {0}")]
-    MerklePaymentVaultContract(#[from] MerkleHandlerError),
-    #[error("Cost unit packing overflow: {0}")]
-    CostUnitOverflow(#[from] CostUnitOverflow),
+    #[error("Payment vault contract error: {0}")]
+    PaymentVaultContract(#[from] payment_vault::error::Error),
 }
 
 #[derive(Clone, Debug)]
@@ -162,33 +155,22 @@ impl Wallet {
         .await
     }
 
-    /// Pay for a Merkle tree batch using packed calldata.
+    /// Pay for a Merkle tree batch.
     ///
-    /// Estimates the cost via the contract's view function, validates balance
-    /// and allowance, packs commitments for compact calldata, then submits.
+    /// Estimates the cost locally from candidate prices, validates balance
+    /// and allowance, then submits pool commitments on-chain.
     pub async fn pay_for_merkle_tree(
         &self,
         depth: u8,
         pool_commitments: Vec<PoolCommitment>,
         merkle_payment_timestamp: u64,
     ) -> Result<(PoolHash, Amount, GasInfo), Error> {
-        let merkle_vault_address = *self
-            .network
-            .merkle_payments_address()
-            .ok_or(MerkleHandlerError::MerklePaymentsAddressNotConfigured)?;
+        let vault_address = *self.network.payment_vault_address();
 
-        let provider = self.to_provider();
-        let handler = MerklePaymentVaultHandler::new(merkle_vault_address, provider);
-
-        let packed: Vec<_> = pool_commitments
-            .iter()
-            .map(|c| c.to_packed())
-            .collect::<Result<_, _>>()?;
-
-        let estimated_cost = handler
-            .estimate_merkle_tree_cost(depth, pool_commitments, merkle_payment_timestamp)
-            .await?;
-        info!("Estimated Merkle tree cost: {estimated_cost}");
+        // Estimate cost locally: sum the top `depth` prices from each pool, take the max.
+        // This is a conservative upper-bound since only one pool wins.
+        let estimated_cost = estimate_merkle_cost_local(depth, &pool_commitments);
+        info!("Estimated Merkle tree cost (local): {estimated_cost}");
 
         let wallet_balance = self.balance_of_tokens().await?;
         if wallet_balance < estimated_cost {
@@ -198,17 +180,20 @@ impl Wallet {
             ));
         }
 
-        let allowance = self.token_allowance(merkle_vault_address).await?;
+        let allowance = self.token_allowance(vault_address).await?;
         if allowance < estimated_cost {
-            info!("Approving Merkle payment vault to spend tokens");
-            self.approve_to_spend_tokens(merkle_vault_address, U256::MAX)
+            info!("Approving payment vault to spend tokens");
+            self.approve_to_spend_tokens(vault_address, U256::MAX)
                 .await?;
         }
+
+        let provider = self.to_provider();
+        let handler = PaymentVaultHandler::new(vault_address, provider);
 
         let (winner_pool_hash, actual_amount, gas_info) = handler
             .pay_for_merkle_tree(
                 depth,
-                packed,
+                pool_commitments,
                 merkle_payment_timestamp,
                 &self.transaction_config,
             )
@@ -386,6 +371,27 @@ pub async fn transfer_gas_tokens(
     Ok(tx_hash)
 }
 
+/// Estimate the maximum cost of a Merkle tree payment locally.
+///
+/// For each pool, sums the top `depth` candidate prices (sorted descending),
+/// then returns the maximum across all pools. This is a conservative upper-bound
+/// since only one pool wins and the contract picks `depth` random winners.
+fn estimate_merkle_cost_local(depth: u8, pool_commitments: &[PoolCommitment]) -> Amount {
+    let depth_usize = usize::from(depth);
+    pool_commitments
+        .iter()
+        .map(|pool| {
+            let mut prices: Vec<Amount> = pool.candidates.iter().map(|c| c.price).collect();
+            prices.sort_unstable_by(|a, b| b.cmp(a)); // descending
+            prices
+                .iter()
+                .take(depth_usize)
+                .fold(Amount::ZERO, |acc, p| acc + p)
+        })
+        .max()
+        .unwrap_or(Amount::ZERO)
+}
+
 /// Contains the payment error and the already succeeded batch payments (if any).
 #[derive(Debug)]
 pub struct PayForQuotesError(pub Error, pub BTreeMap<QuoteHash, TxHash>);
@@ -417,14 +423,12 @@ pub async fn pay_for_quotes<T: IntoIterator<Item = QuotePayment>>(
         ));
     }
 
+    let vault_address = *network.payment_vault_address();
+
     // Get current allowance
-    let allowance = token_allowance(
-        network,
-        wallet_address(&wallet),
-        *network.data_payments_address(),
-    )
-    .await
-    .map_err(|err| PayForQuotesError(Error::from(err), Default::default()))?;
+    let allowance = token_allowance(network, wallet_address(&wallet), vault_address)
+        .await
+        .map_err(|err| PayForQuotesError(Error::from(err), Default::default()))?;
 
     // TODO: Get rid of approvals altogether, by using permits or whatever..
     if allowance < total_amount_to_be_paid {
@@ -432,7 +436,7 @@ pub async fn pay_for_quotes<T: IntoIterator<Item = QuotePayment>>(
         approve_to_spend_tokens(
             wallet.clone(),
             network,
-            *network.data_payments_address(),
+            vault_address,
             U256::MAX,
             transaction_config,
         )
@@ -441,7 +445,7 @@ pub async fn pay_for_quotes<T: IntoIterator<Item = QuotePayment>>(
     }
 
     let provider = http_provider_with_wallet(network.rpc_url().clone(), wallet);
-    let data_payments = PaymentVaultHandler::new(*network.data_payments_address(), provider);
+    let data_payments = PaymentVaultHandler::new(vault_address, provider);
 
     // remove payments with 0 amount as they don't need to be paid for
     let payment_for_batch: Vec<QuotePayment> = payments
