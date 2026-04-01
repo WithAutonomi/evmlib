@@ -167,8 +167,8 @@ impl Wallet {
     ) -> Result<(PoolHash, Amount, GasInfo), Error> {
         let vault_address = *self.network.payment_vault_address();
 
-        // Estimate cost locally: sum the top `depth` prices from each pool, take the max.
-        // This is a conservative upper-bound since only one pool wins.
+        // Worst-case estimate: median(pool_prices) * 2^depth, take max across pools.
+        // Matches the Solidity formula; the only unknown is which pool wins.
         let estimated_cost = estimate_merkle_cost_local(depth, &pool_commitments);
         info!("Estimated Merkle tree cost (local): {estimated_cost}");
 
@@ -371,22 +371,20 @@ pub async fn transfer_gas_tokens(
     Ok(tx_hash)
 }
 
-/// Estimate the maximum cost of a Merkle tree payment locally.
+/// Estimate the worst-case cost of a Merkle tree payment locally.
 ///
-/// For each pool, sums the top `depth` candidate prices (sorted descending),
-/// then returns the maximum across all pools. This is a conservative upper-bound
-/// since only one pool wins and the contract picks `depth` random winners.
+/// The Solidity contract charges `median16(quotes) * (1 << depth)` for the
+/// winning pool. The only unknown is which pool wins, so the worst case is
+/// the pool with the highest `median(prices) * 2^depth`.
 fn estimate_merkle_cost_local(depth: u8, pool_commitments: &[PoolCommitment]) -> Amount {
-    let depth_usize = usize::from(depth);
+    let multiplier = Amount::from(1u64 << depth);
     pool_commitments
         .iter()
         .map(|pool| {
             let mut prices: Vec<Amount> = pool.candidates.iter().map(|c| c.price).collect();
-            prices.sort_unstable_by(|a, b| b.cmp(a)); // descending
-            prices
-                .iter()
-                .take(depth_usize)
-                .fold(Amount::ZERO, |acc, p| acc + p)
+            prices.sort_unstable(); // ascending
+            // Upper median (index 8 of 16) — matches Solidity's median16 (k = 8)
+            prices[prices.len() / 2] * multiplier
         })
         .max()
         .unwrap_or(Amount::ZERO)
@@ -524,6 +522,65 @@ mod tests {
     use crate::wallet::{Wallet, from_private_key};
     use alloy::network::{Ethereum, EthereumWallet, NetworkWallet};
     use alloy::primitives::address;
+
+    use super::estimate_merkle_cost_local;
+    use crate::merkle_batch_payment::{CANDIDATES_PER_POOL, CandidateNode, PoolCommitment};
+
+    fn make_pool(prices: [u64; CANDIDATES_PER_POOL]) -> PoolCommitment {
+        let candidates = std::array::from_fn(|i| CandidateNode {
+            rewards_address: alloy::primitives::Address::new([i as u8; 20]),
+            price: Amount::from(prices[i]),
+        });
+        PoolCommitment {
+            pool_hash: [0u8; 32],
+            candidates,
+        }
+    }
+
+    #[test]
+    fn test_estimate_uniform_prices() {
+        // All candidates quote 100, depth=4
+        // median=100, total = 100 * 2^4 = 1600
+        let pool = make_pool([100; CANDIDATES_PER_POOL]);
+        let cost = estimate_merkle_cost_local(4, &[pool]);
+        assert_eq!(cost, Amount::from(1600u64));
+    }
+
+    #[test]
+    fn test_estimate_varying_prices() {
+        // Prices 1..=16, sorted ascending: [1,2,...,16]
+        // Upper median at index 8 = 9
+        // total = 9 * 2^3 = 72
+        let prices: [u64; CANDIDATES_PER_POOL] = std::array::from_fn(|i| (i + 1) as u64);
+        let pool = make_pool(prices);
+        let cost = estimate_merkle_cost_local(3, &[pool]);
+        assert_eq!(cost, Amount::from(72u64));
+    }
+
+    #[test]
+    fn test_estimate_picks_worst_pool() {
+        // Pool A: all quote 100 → median=100, total=100*4=400
+        // Pool B: all quote 200 → median=200, total=200*4=800
+        // Worst case = 800
+        let pool_a = make_pool([100; CANDIDATES_PER_POOL]);
+        let pool_b = make_pool([200; CANDIDATES_PER_POOL]);
+        let cost = estimate_merkle_cost_local(2, &[pool_a, pool_b]);
+        assert_eq!(cost, Amount::from(800u64));
+    }
+
+    #[test]
+    fn test_estimate_empty_pools() {
+        let cost = estimate_merkle_cost_local(4, &[]);
+        assert_eq!(cost, Amount::ZERO);
+    }
+
+    #[test]
+    fn test_estimate_depth_1() {
+        // depth=1: total = median * 2^1 = median * 2
+        let pool = make_pool([50; CANDIDATES_PER_POOL]);
+        let cost = estimate_merkle_cost_local(1, &[pool]);
+        assert_eq!(cost, Amount::from(100u64));
+    }
 
     #[tokio::test]
     async fn test_from_private_key() {

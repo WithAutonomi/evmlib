@@ -177,15 +177,19 @@ impl Network {
 
     /// Estimate the cost of a Merkle tree batch locally.
     ///
-    /// Computes a conservative upper-bound by summing the top `depth` candidate
-    /// prices from each pool and returning the maximum. No on-chain call is made.
+    /// Estimates the worst-case cost of a Merkle tree payment locally.
+    ///
+    /// The Solidity contract charges `median16(quotes) * (1 << depth)` for the
+    /// winning pool. The only unknown is which pool wins, so the worst case is
+    /// the pool with the highest `median(prices) * 2^depth`. No on-chain call
+    /// is made.
     ///
     /// # Arguments
     /// * `depth` - The Merkle tree depth
     /// * `pool_commitments` - Vector of pool commitments with prices (one per reward pool)
     ///
     /// # Returns
-    /// * Estimated total cost in AttoTokens
+    /// * Worst-case cost estimate in AttoTokens
     pub fn estimate_merkle_payment_cost(
         &self,
         depth: u8,
@@ -195,16 +199,14 @@ impl Network {
             return Amount::ZERO;
         }
 
-        let depth_usize = usize::from(depth);
+        let multiplier = Amount::from(1u64 << depth);
         pool_commitments
             .iter()
             .map(|pool| {
                 let mut prices: Vec<Amount> = pool.candidates.iter().map(|c| c.price).collect();
-                prices.sort_unstable_by(|a, b| b.cmp(a)); // descending
-                prices
-                    .iter()
-                    .take(depth_usize)
-                    .fold(Amount::ZERO, |acc, p| acc + p)
+                prices.sort_unstable(); // ascending
+                // Upper median (index 8 of 16) — matches Solidity's median16 (k = 8)
+                prices[prices.len() / 2] * multiplier
             })
             .max()
             .unwrap_or(Amount::ZERO)
