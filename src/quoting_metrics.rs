@@ -21,8 +21,6 @@ pub struct QuotingMetrics {
     pub close_records_stored: usize,
     /// each entry to be `(data_type_index, num_of_records_of_that_type)`
     pub records_per_type: Vec<(u32, u32)>,
-    /// the max_records configured
-    pub max_records: usize,
     /// number of times that got paid
     pub received_payment_count: usize,
     /// the duration that node keeps connected to the network, measured in hours
@@ -40,12 +38,11 @@ impl Debug for QuotingMetrics {
 
         write!(
             formatter,
-            "QuotingMetrics {{ data_type: {}, data_size: {}, close_records_stored: {}, records_per_type {:?}, max_records: {}, received_payment_count: {}, live_time: {}, network_density: {density_u256:?}, network_size: {:?} }}",
+            "QuotingMetrics {{ data_type: {}, data_size: {}, close_records_stored: {}, records_per_type {:?}, received_payment_count: {}, live_time: {}, network_density: {density_u256:?}, network_size: {:?} }}",
             self.data_type,
             self.data_size,
             self.close_records_stored,
             self.records_per_type,
-            self.max_records,
             self.received_payment_count,
             self.live_time,
             self.network_size
@@ -69,7 +66,6 @@ impl QuotingMetrics {
             bytes.extend_from_slice(&dtype.to_le_bytes());
             bytes.extend_from_slice(&count.to_le_bytes());
         }
-        bytes.extend_from_slice(&(self.max_records as u64).to_le_bytes());
         bytes.extend_from_slice(&(self.received_payment_count as u64).to_le_bytes());
         bytes.extend_from_slice(&self.live_time.to_le_bytes());
         if let Some(density) = &self.network_density {
