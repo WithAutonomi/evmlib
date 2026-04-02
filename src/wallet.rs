@@ -7,14 +7,11 @@
 // permissions and limitations relating to use of the SAFE Network Software.
 
 use crate::common::{Address, Amount, QuoteHash, QuotePayment, TxHash, U256};
-use crate::contract::merkle_payment_vault::error::Error as MerkleHandlerError;
-use crate::contract::merkle_payment_vault::handler::MerklePaymentVaultHandler;
-use crate::contract::merkle_payment_vault::interface::PoolHash;
 use crate::contract::network_token::NetworkToken;
 use crate::contract::payment_vault::MAX_TRANSFERS_PER_TRANSACTION;
 use crate::contract::payment_vault::handler::PaymentVaultHandler;
 use crate::contract::{network_token, payment_vault};
-use crate::merkle_batch_payment::{CostUnitOverflow, PoolCommitment};
+use crate::merkle_batch_payment::{PoolCommitment, PoolHash};
 use crate::retry::GasInfo;
 use crate::transaction_config::TransactionConfig;
 use crate::utils::http_provider;
@@ -43,12 +40,8 @@ pub enum Error {
     RpcError(#[from] RpcError<TransportErrorKind>),
     #[error("Network token contract error: {0}")]
     NetworkTokenContract(#[from] network_token::Error),
-    #[error("Chunk payments contract error: {0}")]
-    ChunkPaymentsContract(#[from] payment_vault::error::Error),
-    #[error("Merkle payment vault contract error: {0}")]
-    MerklePaymentVaultContract(#[from] MerkleHandlerError),
-    #[error("Cost unit packing overflow: {0}")]
-    CostUnitOverflow(#[from] CostUnitOverflow),
+    #[error("Payment vault contract error: {0}")]
+    PaymentVaultContract(#[from] payment_vault::error::Error),
 }
 
 #[derive(Clone, Debug)]
@@ -162,33 +155,24 @@ impl Wallet {
         .await
     }
 
-    /// Pay for a Merkle tree batch using packed calldata.
+    /// Pay for a Merkle tree batch.
     ///
-    /// Estimates the cost via the contract's view function, validates balance
-    /// and allowance, packs commitments for compact calldata, then submits.
+    /// Estimates the cost locally from candidate prices, validates balance
+    /// and allowance, then submits pool commitments on-chain.
     pub async fn pay_for_merkle_tree(
         &self,
         depth: u8,
         pool_commitments: Vec<PoolCommitment>,
         merkle_payment_timestamp: u64,
     ) -> Result<(PoolHash, Amount, GasInfo), Error> {
-        let merkle_vault_address = *self
+        let vault_address = *self.network.payment_vault_address();
+
+        // Worst-case estimate: median(pool_prices) * 2^depth, take max across pools.
+        // Matches the Solidity formula; the only unknown is which pool wins.
+        let estimated_cost = self
             .network
-            .merkle_payments_address()
-            .ok_or(MerkleHandlerError::MerklePaymentsAddressNotConfigured)?;
-
-        let provider = self.to_provider();
-        let handler = MerklePaymentVaultHandler::new(merkle_vault_address, provider);
-
-        let packed: Vec<_> = pool_commitments
-            .iter()
-            .map(|c| c.to_packed())
-            .collect::<Result<_, _>>()?;
-
-        let estimated_cost = handler
-            .estimate_merkle_tree_cost(depth, pool_commitments, merkle_payment_timestamp)
-            .await?;
-        info!("Estimated Merkle tree cost: {estimated_cost}");
+            .estimate_merkle_payment_cost(depth, &pool_commitments);
+        info!("Estimated Merkle tree cost (local): {estimated_cost}");
 
         let wallet_balance = self.balance_of_tokens().await?;
         if wallet_balance < estimated_cost {
@@ -198,17 +182,20 @@ impl Wallet {
             ));
         }
 
-        let allowance = self.token_allowance(merkle_vault_address).await?;
+        let allowance = self.token_allowance(vault_address).await?;
         if allowance < estimated_cost {
-            info!("Approving Merkle payment vault to spend tokens");
-            self.approve_to_spend_tokens(merkle_vault_address, U256::MAX)
+            info!("Approving payment vault to spend tokens");
+            self.approve_to_spend_tokens(vault_address, U256::MAX)
                 .await?;
         }
+
+        let provider = self.to_provider();
+        let handler = PaymentVaultHandler::new(vault_address, provider);
 
         let (winner_pool_hash, actual_amount, gas_info) = handler
             .pay_for_merkle_tree(
                 depth,
-                packed,
+                pool_commitments,
                 merkle_payment_timestamp,
                 &self.transaction_config,
             )
@@ -417,14 +404,12 @@ pub async fn pay_for_quotes<T: IntoIterator<Item = QuotePayment>>(
         ));
     }
 
+    let vault_address = *network.payment_vault_address();
+
     // Get current allowance
-    let allowance = token_allowance(
-        network,
-        wallet_address(&wallet),
-        *network.data_payments_address(),
-    )
-    .await
-    .map_err(|err| PayForQuotesError(Error::from(err), Default::default()))?;
+    let allowance = token_allowance(network, wallet_address(&wallet), vault_address)
+        .await
+        .map_err(|err| PayForQuotesError(Error::from(err), Default::default()))?;
 
     // TODO: Get rid of approvals altogether, by using permits or whatever..
     if allowance < total_amount_to_be_paid {
@@ -432,7 +417,7 @@ pub async fn pay_for_quotes<T: IntoIterator<Item = QuotePayment>>(
         approve_to_spend_tokens(
             wallet.clone(),
             network,
-            *network.data_payments_address(),
+            vault_address,
             U256::MAX,
             transaction_config,
         )
@@ -441,7 +426,7 @@ pub async fn pay_for_quotes<T: IntoIterator<Item = QuotePayment>>(
     }
 
     let provider = http_provider_with_wallet(network.rpc_url().clone(), wallet);
-    let data_payments = PaymentVaultHandler::new(*network.data_payments_address(), provider);
+    let data_payments = PaymentVaultHandler::new(vault_address, provider);
 
     // remove payments with 0 amount as they don't need to be paid for
     let payment_for_batch: Vec<QuotePayment> = payments
@@ -520,6 +505,70 @@ mod tests {
     use crate::wallet::{Wallet, from_private_key};
     use alloy::network::{Ethereum, EthereumWallet, NetworkWallet};
     use alloy::primitives::address;
+
+    use crate::Network;
+    use crate::merkle_batch_payment::{CANDIDATES_PER_POOL, CandidateNode, PoolCommitment};
+
+    fn make_pool(prices: [u64; CANDIDATES_PER_POOL]) -> PoolCommitment {
+        let candidates = std::array::from_fn(|i| CandidateNode {
+            rewards_address: alloy::primitives::Address::new([i as u8; 20]),
+            price: Amount::from(prices[i]),
+        });
+        PoolCommitment {
+            pool_hash: [0u8; 32],
+            candidates,
+        }
+    }
+
+    #[test]
+    fn test_estimate_uniform_prices() {
+        // All candidates quote 100, depth=4
+        // median=100, total = 100 * 2^4 = 1600
+        let network = Network::ArbitrumOne;
+        let pool = make_pool([100; CANDIDATES_PER_POOL]);
+        let cost = network.estimate_merkle_payment_cost(4, &[pool]);
+        assert_eq!(cost, Amount::from(1600u64));
+    }
+
+    #[test]
+    fn test_estimate_varying_prices() {
+        // Prices 1..=16, sorted ascending: [1,2,...,16]
+        // Upper median at index 8 = 9
+        // total = 9 * 2^3 = 72
+        let network = Network::ArbitrumOne;
+        let prices: [u64; CANDIDATES_PER_POOL] = std::array::from_fn(|i| (i + 1) as u64);
+        let pool = make_pool(prices);
+        let cost = network.estimate_merkle_payment_cost(3, &[pool]);
+        assert_eq!(cost, Amount::from(72u64));
+    }
+
+    #[test]
+    fn test_estimate_picks_worst_pool() {
+        // Pool A: all quote 100 → median=100, total=100*4=400
+        // Pool B: all quote 200 → median=200, total=200*4=800
+        // Worst case = 800
+        let network = Network::ArbitrumOne;
+        let pool_a = make_pool([100; CANDIDATES_PER_POOL]);
+        let pool_b = make_pool([200; CANDIDATES_PER_POOL]);
+        let cost = network.estimate_merkle_payment_cost(2, &[pool_a, pool_b]);
+        assert_eq!(cost, Amount::from(800u64));
+    }
+
+    #[test]
+    fn test_estimate_empty_pools() {
+        let network = Network::ArbitrumOne;
+        let cost = network.estimate_merkle_payment_cost(4, &[]);
+        assert_eq!(cost, Amount::ZERO);
+    }
+
+    #[test]
+    fn test_estimate_depth_1() {
+        // depth=1: total = median * 2^1 = median * 2
+        let network = Network::ArbitrumOne;
+        let pool = make_pool([50; CANDIDATES_PER_POOL]);
+        let cost = network.estimate_merkle_payment_cost(1, &[pool]);
+        assert_eq!(cost, Amount::from(100u64));
+    }
 
     #[tokio::test]
     async fn test_from_private_key() {

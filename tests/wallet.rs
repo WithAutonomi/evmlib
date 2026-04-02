@@ -10,9 +10,8 @@ use alloy::providers::ext::AnvilApi;
 use alloy::providers::{ProviderBuilder, WalletProvider};
 use alloy::signers::local::{LocalSigner, PrivateKeySigner};
 use evmlib::common::{Amount, TxHash};
-use evmlib::contract::payment_vault::{MAX_TRANSFERS_PER_TRANSACTION, verify_data_payment};
-use evmlib::quoting_metrics::QuotingMetrics;
-use evmlib::testnet::{deploy_data_payments_contract, deploy_network_token_contract, start_node};
+use evmlib::contract::payment_vault::MAX_TRANSFERS_PER_TRANSACTION;
+use evmlib::testnet::{deploy_network_token_contract, deploy_payment_vault_contract, start_node};
 use evmlib::transaction_config::TransactionConfig;
 use evmlib::wallet::{Wallet, transfer_tokens, wallet_address};
 use evmlib::{CustomNetwork, Network};
@@ -26,21 +25,16 @@ async fn local_testnet() -> (AnvilInstance, Network, EthereumWallet) {
         .await
         .unwrap();
     let payment_token_address = *network_token.contract.address();
-    let data_payments = deploy_data_payments_contract(&rpc_url, &node, payment_token_address)
+    let payment_vault = deploy_payment_vault_contract(&rpc_url, &node, payment_token_address)
         .await
         .unwrap();
-    let merkle_payments =
-        evmlib::testnet::deploy_merkle_payments_contract(&rpc_url, &node, payment_token_address)
-            .await
-            .unwrap();
 
     (
         node,
         Network::Custom(CustomNetwork {
             rpc_url_http: rpc_url,
             payment_token_address,
-            data_payments_address: *data_payments.contract.address(),
-            merkle_payments_address: Some(*merkle_payments.contract.address()),
+            payment_vault_address: *payment_vault.contract.address(),
         }),
         network_token.contract.provider().wallet().clone(),
     )
@@ -80,7 +74,7 @@ async fn funded_wallet(network: &Network, genesis_wallet: EthereumWallet) -> Wal
 }
 
 #[tokio::test]
-async fn test_pay_for_quotes_and_data_payment_verification() {
+async fn test_pay_for_quotes() {
     const CHUNK_PAYMENTS: usize = 600;
     const QUOTES_PER_CHUNK: usize = 5;
 
@@ -113,34 +107,4 @@ async fn test_pay_for_quotes_and_data_payment_verification() {
             .mul(QUOTES_PER_CHUNK)
             .div_ceil(MAX_TRANSFERS_PER_TRANSACTION)
     );
-
-    for quotes in quote_payments.iter() {
-        let mut payments_to_verify = vec![];
-
-        for (quote_hash, reward_addr, _) in quotes {
-            payments_to_verify.push((
-                *quote_hash,
-                QuotingMetrics {
-                    data_size: 0,
-                    data_type: 0,
-                    close_records_stored: 0,
-                    records_per_type: vec![],
-                    max_records: 0,
-                    received_payment_count: 0,
-                    live_time: 0,
-                    network_density: None,
-                    network_size: None,
-                },
-                *reward_addr,
-            ));
-        }
-
-        let result = verify_data_payment(&network, vec![], payments_to_verify.clone()).await;
-
-        assert!(
-            result.is_ok(),
-            "Verification failed for: {payments_to_verify:?}. Error: {:?}",
-            result.err()
-        );
-    }
 }

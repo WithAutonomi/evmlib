@@ -68,12 +68,12 @@ pub fn pay_for_quotes_calldata<T: IntoIterator<Item = QuotePayment>>(
 
     let total_amount = payments.iter().map(|(_, _, amount)| amount).sum();
 
-    let approve_spender = *network.data_payments_address();
+    let approve_spender = *network.payment_vault_address();
     let approve_amount = total_amount;
 
     let provider = http_provider(network.rpc_url().clone());
     let data_payments = crate::contract::payment_vault::handler::PaymentVaultHandler::new(
-        *network.data_payments_address(),
+        *network.payment_vault_address(),
         provider,
     );
 

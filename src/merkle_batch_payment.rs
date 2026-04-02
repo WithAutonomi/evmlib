@@ -12,34 +12,17 @@
 //! mock implementation of the smart contract. When the real smart contract is ready, the
 //! disk contract will be replaced with actual on-chain calls.
 
-use crate::common::{Address as RewardsAddress, U256};
-use crate::contract::data_type_conversion;
-use crate::quoting_metrics::QuotingMetrics;
-use serde::{Deserialize, Serialize};
+use crate::common::{Address as RewardsAddress, Amount};
 
 #[cfg(test)]
-use crate::common::Amount;
+use crate::common::U256;
+use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
 use std::path::PathBuf;
 
 #[cfg(test)]
 use thiserror::Error;
-
-/// Error returned when `total_cost_unit` exceeds the 248-bit limit during packing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CostUnitOverflow;
-
-impl std::fmt::Display for CostUnitOverflow {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "total_cost_unit exceeds {TOTAL_COST_UNIT_BITS}-bit limit (top 8 bits reserved for packing)"
-        )
-    }
-}
-
-impl std::error::Error for CostUnitOverflow {}
 
 /// Pool hash type (32 bytes) - compatible with XorName without the dependency
 pub type PoolHash = [u8; 32];
@@ -50,33 +33,9 @@ pub const CANDIDATES_PER_POOL: usize = 16;
 /// Maximum supported Merkle tree depth
 pub const MAX_MERKLE_DEPTH: u8 = 8;
 
-/// Number of bits available for total_cost_unit when packed with data_type (u8 = 8 bits)
-const TOTAL_COST_UNIT_BITS: usize = 248;
-
-/// Cost unit weights per data type, matching the production contract's `costUnitPerDataType` mapping.
-/// These weights determine the relative storage cost of each data type.
-const COST_UNIT_GRAPH_ENTRY: u64 = 1;
-const COST_UNIT_SCRATCHPAD: u64 = 100;
-const COST_UNIT_CHUNK: u64 = 10;
-const COST_UNIT_POINTER: u64 = 20;
-
-/// Get the cost unit for a Solidity DataType index.
-///
-/// Matches the contract's `costUnitPerDataType` mapping:
-///   GraphEntry(0) = 1, Scratchpad(1) = 100, Chunk(2) = 10, Pointer(3) = 20
-fn cost_unit_for_data_type(solidity_data_type: u8) -> U256 {
-    match solidity_data_type {
-        0 => U256::from(COST_UNIT_GRAPH_ENTRY),
-        1 => U256::from(COST_UNIT_SCRATCHPAD),
-        2 => U256::from(COST_UNIT_CHUNK),
-        3 => U256::from(COST_UNIT_POINTER),
-        _ => U256::ZERO,
-    }
-}
-
 /// Calculate expected number of reward pools for a given tree depth
 ///
-/// Formula: 2^ceil(depth/2)
+/// Formula: 2^ceil(depth/2) — must match `MerklePaymentLib.expectedRewardPools` in Solidity
 pub fn expected_reward_pools(depth: u8) -> usize {
     let half_depth = depth.div_ceil(2);
     1 << half_depth
@@ -92,126 +51,34 @@ pub struct PoolCommitment {
     /// This commits to the midpoint proof and all node signatures
     pub pool_hash: PoolHash,
 
-    /// Candidate nodes with metrics
+    /// Candidate nodes with prices
     pub candidates: [CandidateNode; CANDIDATES_PER_POOL],
 }
 
-/// Candidate node with metrics for pool commitment
+/// Candidate node with price for pool commitment
+///
+/// Nodes calculate their own price as `(chunks_stored / 6000)^2`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CandidateNode {
     /// Rewards address of the candidate node
     pub rewards_address: RewardsAddress,
 
-    /// Metrics of the candidate node
-    pub metrics: QuotingMetrics,
+    /// Node-calculated price
+    pub price: Amount,
 }
 
-/// Packed candidate node for compact calldata (v2)
-///
-/// This struct packs the data type and total cost unit into a single U256 to reduce calldata size.
-/// The packing format is: `packed = (totalCostUnit << 8) | dataType`
-/// - dataType occupies bits 0-7 (lower 8 bits)
-/// - totalCostUnit occupies bits 8-255
+/// What's stored on-chain (or disk) - indexed by winner_pool_hash
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CandidateNodePacked {
-    /// Rewards address of the candidate node
-    pub rewards_address: RewardsAddress,
+pub struct OnChainPaymentInfo {
+    /// Tree depth
+    pub depth: u8,
 
-    /// Packed data: (totalCostUnit << 8) | dataType
-    pub data_type_and_total_cost_unit: U256,
-}
+    /// Merkle payment timestamp provided by client (unix seconds)
+    /// This is the timestamp that all nodes in the pool used for their quotes
+    pub merkle_payment_timestamp: u64,
 
-/// Packed pool commitment for compact calldata (v2)
-///
-/// Uses CandidateNodePacked instead of CandidateNode for smaller calldata.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PoolCommitmentPacked {
-    /// Hash of the full MerklePaymentCandidatePool (cryptographic commitment)
-    pub pool_hash: PoolHash,
-
-    /// Packed candidate nodes
-    pub candidates: [CandidateNodePacked; CANDIDATES_PER_POOL],
-}
-
-/// Encode data type and total cost unit into a single U256
-///
-/// Format: `packed = (totalCostUnit << 8) | dataType`
-/// - dataType occupies bits 0-7 (lower 8 bits)
-/// - totalCostUnit occupies bits 8-255
-pub fn encode_data_type_and_cost(
-    data_type: u8,
-    total_cost_unit: U256,
-) -> Result<U256, CostUnitOverflow> {
-    if total_cost_unit >= (U256::from(1) << TOTAL_COST_UNIT_BITS) {
-        return Err(CostUnitOverflow);
-    }
-    Ok((total_cost_unit << 8) | U256::from(data_type))
-}
-
-/// Decode data type and total cost unit from a packed U256
-///
-/// Returns (data_type, total_cost_unit)
-#[cfg(test)]
-pub fn decode_data_type_and_cost(packed: U256) -> (u8, U256) {
-    let data_type = (packed & U256::from(0xFF)).to::<u8>();
-    let total_cost_unit = packed >> 8;
-    (data_type, total_cost_unit)
-}
-
-/// Calculate total cost unit from QuotingMetrics
-///
-/// Matches the contract's `_getTotalCostUnit`: for each record type, multiplies the record
-/// count by that type's `costUnitPerDataType` weight, then sums the results.
-/// Falls back to close_records_stored if records_per_type is empty (fresh nodes).
-/// Uses a minimum of 1 to ensure non-zero cost unit.
-pub fn calculate_total_cost_unit(metrics: &QuotingMetrics) -> U256 {
-    // Sum: costUnitPerDataType[dataType] * records, matching the contract
-    let total_from_types: U256 =
-        metrics
-            .records_per_type
-            .iter()
-            .fold(U256::ZERO, |acc, (data_type, count)| {
-                let solidity_type = data_type_conversion(*data_type);
-                acc + cost_unit_for_data_type(solidity_type) * U256::from(*count)
-            });
-
-    if total_from_types > U256::ZERO {
-        total_from_types
-    } else {
-        // Use close_records_stored as fallback for fresh nodes, with minimum of 1
-        let fallback = std::cmp::max(metrics.close_records_stored as u64, 1);
-        let solidity_type = data_type_conversion(metrics.data_type);
-        cost_unit_for_data_type(solidity_type) * U256::from(fallback)
-    }
-}
-
-impl CandidateNode {
-    /// Convert to packed format for v2 contract calls
-    pub fn to_packed(&self) -> Result<CandidateNodePacked, CostUnitOverflow> {
-        let data_type = data_type_conversion(self.metrics.data_type);
-        let total_cost_unit = calculate_total_cost_unit(&self.metrics);
-        Ok(CandidateNodePacked {
-            rewards_address: self.rewards_address,
-            data_type_and_total_cost_unit: encode_data_type_and_cost(data_type, total_cost_unit)?,
-        })
-    }
-}
-
-impl PoolCommitment {
-    /// Convert to packed format for v2 contract calls
-    pub fn to_packed(&self) -> Result<PoolCommitmentPacked, CostUnitOverflow> {
-        let mut packed_candidates = Vec::with_capacity(CANDIDATES_PER_POOL);
-        for c in &self.candidates {
-            packed_candidates.push(c.to_packed()?);
-        }
-        let candidates: [CandidateNodePacked; CANDIDATES_PER_POOL] = packed_candidates
-            .try_into()
-            .expect("Vec length matches CANDIDATES_PER_POOL");
-        Ok(PoolCommitmentPacked {
-            pool_hash: self.pool_hash,
-            candidates,
-        })
-    }
+    /// Addresses of the 'depth' nodes that were paid, with their pool index and paid amount
+    pub paid_node_addresses: Vec<(RewardsAddress, usize, Amount)>,
 }
 
 #[cfg(test)]
@@ -235,20 +102,6 @@ pub enum SmartContractError {
 
     #[error("JSON error: {0}")]
     JsonError(#[from] serde_json::Error),
-}
-
-/// What's stored on-chain (or disk) - indexed by winner_pool_hash
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct OnChainPaymentInfo {
-    /// Tree depth
-    pub depth: u8,
-
-    /// Merkle payment timestamp provided by client (unix seconds)
-    /// This is the timestamp that all nodes in the pool used for their quotes
-    pub merkle_payment_timestamp: u64,
-
-    /// Addresses of the 'depth' nodes that were paid along with their indices in the winner pool
-    pub paid_node_addresses: Vec<(RewardsAddress, usize)>,
 }
 
 #[cfg(test)]
@@ -350,16 +203,21 @@ impl DiskMerklePaymentContract {
             winner_node_indices.len()
         );
 
+        // Calculate total amount from winner node prices
+        let mut total_amount = Amount::ZERO;
+
         // Extract paid node addresses, along with their indices
         let mut paid_node_addresses = Vec::new();
         for (i, &node_idx) in winner_node_indices.iter().enumerate() {
-            let addr = winner_pool.candidates[node_idx].rewards_address;
-            paid_node_addresses.push((addr, node_idx));
-            println!("  Node {}: {addr}", i + 1);
+            let candidate = &winner_pool.candidates[node_idx];
+            let addr = candidate.rewards_address;
+            paid_node_addresses.push((addr, node_idx, candidate.price));
+            total_amount += candidate.price;
+            println!("  Node {}: {addr} (price: {})", i + 1, candidate.price);
         }
 
         println!(
-            "\nSimulating payment to {} nodes...",
+            "\nSimulating payment to {} nodes, total: {total_amount}...",
             paid_node_addresses.len()
         );
         println!("=========================\n");
@@ -379,10 +237,7 @@ impl DiskMerklePaymentContract {
 
         println!("✓ Stored payment info to: {}", file_path.display());
 
-        // placeholder amount based on depth
-        let placeholder_amount = Amount::from(2_u64.pow(depth as u32));
-
-        Ok((winner_pool_hash, placeholder_amount))
+        Ok((winner_pool_hash, total_amount))
     }
 
     /// Get payment info by winner pool hash
@@ -405,150 +260,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_encode_decode_data_type_and_cost() {
-        // Test basic encoding/decoding
-        let data_type: u8 = 2; // Chunk
-        let total_cost_unit = U256::from(1000u64); // Record count
-
-        let packed = encode_data_type_and_cost(data_type, total_cost_unit).unwrap();
-        let (decoded_type, decoded_cost) = decode_data_type_and_cost(packed);
-
-        assert_eq!(decoded_type, data_type);
-        assert_eq!(decoded_cost, total_cost_unit);
+    fn test_expected_reward_pools() {
+        assert_eq!(expected_reward_pools(1), 2);
+        assert_eq!(expected_reward_pools(2), 2);
+        assert_eq!(expected_reward_pools(3), 4);
+        assert_eq!(expected_reward_pools(4), 4);
+        assert_eq!(expected_reward_pools(8), 16);
     }
 
     #[test]
-    fn test_encode_decode_boundary_values() {
-        // Test with max u8 data type
-        let data_type: u8 = 255;
-        let total_cost_unit = U256::from(100u64);
-
-        let packed = encode_data_type_and_cost(data_type, total_cost_unit).unwrap();
-        let (decoded_type, decoded_cost) = decode_data_type_and_cost(packed);
-
-        assert_eq!(decoded_type, data_type);
-        assert_eq!(decoded_cost, total_cost_unit);
-    }
-
-    #[test]
-    fn test_encode_decode_zero_values() {
-        // Test with zero values
-        let packed = encode_data_type_and_cost(0, U256::ZERO).unwrap();
-        let (decoded_type, decoded_cost) = decode_data_type_and_cost(packed);
-
-        assert_eq!(decoded_type, 0);
-        assert_eq!(decoded_cost, U256::ZERO);
-    }
-
-    #[test]
-    fn test_encode_returns_error_on_overflow() {
-        // total_cost_unit that uses all 256 bits should fail
-        let overflow_value = U256::MAX;
-        let result = encode_data_type_and_cost(0, overflow_value);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_encode_decode_large_cost() {
-        // Test with large cost (U256 max - some value to avoid overflow when shifting)
-        let data_type: u8 = 1;
-        let large_cost = U256::from(u128::MAX);
-
-        let packed = encode_data_type_and_cost(data_type, large_cost).unwrap();
-        let (decoded_type, decoded_cost) = decode_data_type_and_cost(packed);
-
-        assert_eq!(decoded_type, data_type);
-        assert_eq!(decoded_cost, large_cost);
-    }
-
-    #[test]
-    fn test_calculate_total_cost_unit() {
-        let metrics = QuotingMetrics {
-            data_type: 0,
-            data_size: 1024 * 1024,
-            close_records_stored: 100,
-            records_per_type: vec![(0, 10), (1, 20), (2, 5)],
-            max_records: 1000,
-            received_payment_count: 50,
-            live_time: 3600,
-            network_density: None,
-            network_size: Some(1000),
-        };
-
-        let total_cost = calculate_total_cost_unit(&metrics);
-
-        // Rust type 0 -> Chunk(cost=10):   10 * 10 = 100
-        // Rust type 1 -> GraphEntry(cost=1): 20 * 1  = 20
-        // Rust type 2 -> Pointer(cost=20):   5  * 20 = 100
-        // Total = 220
-        assert_eq!(total_cost, U256::from(220u64));
-    }
-
-    #[test]
-    fn test_calculate_total_cost_unit_empty_records() {
-        let metrics = QuotingMetrics {
-            data_type: 0,
-            data_size: 1024,
-            close_records_stored: 0,
-            records_per_type: vec![],
-            max_records: 1000,
-            received_payment_count: 0,
-            live_time: 0,
-            network_density: None,
-            network_size: None,
-        };
-
-        let total_cost = calculate_total_cost_unit(&metrics);
-        // Fallback: max(0, 1) = 1 record, data_type 0 -> Chunk(cost=10), total = 10
-        assert_eq!(total_cost, U256::from(10u64));
-    }
-
-    #[test]
-    fn test_candidate_node_to_packed() {
-        let metrics = QuotingMetrics {
-            data_type: 0, // Will be converted to 2 (Chunk) by data_type_conversion
-            data_size: 1024 * 1024,
-            close_records_stored: 100,
-            records_per_type: vec![(0, 10)],
-            max_records: 1000,
-            received_payment_count: 50,
-            live_time: 3600,
-            network_density: None,
-            network_size: Some(1000),
-        };
-
+    fn test_candidate_node_price() {
         let candidate = CandidateNode {
             rewards_address: RewardsAddress::from([0x42; 20]),
-            metrics,
+            price: U256::from(1000u64),
         };
-
-        let packed = candidate.to_packed().unwrap();
-
-        assert_eq!(packed.rewards_address, candidate.rewards_address);
-
-        // Decode and verify
-        let (data_type, total_cost) =
-            decode_data_type_and_cost(packed.data_type_and_total_cost_unit);
-        assert_eq!(data_type, 2); // Chunk data type after conversion
-        assert_eq!(total_cost, U256::from(100u64)); // 10 records * Chunk cost unit (10)
+        assert_eq!(candidate.price, U256::from(1000u64));
+        assert_eq!(candidate.rewards_address, RewardsAddress::from([0x42; 20]));
     }
 
     #[test]
-    fn test_pool_commitment_to_packed() {
+    fn test_pool_commitment_structure() {
         let candidates: [CandidateNode; CANDIDATES_PER_POOL] =
             std::array::from_fn(|i| CandidateNode {
                 rewards_address: RewardsAddress::from([i as u8; 20]),
-                metrics: QuotingMetrics {
-                    data_type: 0,
-                    data_size: 1024,
-                    close_records_stored: i * 10,
-                    records_per_type: vec![(0, i as u32)],
-                    max_records: 1000,
-                    received_payment_count: i,
-                    live_time: 3600,
-                    network_density: None,
-                    network_size: None,
-                },
+                price: U256::from((i as u64 + 1) * 100),
             });
 
         let pool = PoolCommitment {
@@ -556,15 +291,9 @@ mod tests {
             candidates,
         };
 
-        let packed = pool.to_packed().unwrap();
-
-        assert_eq!(packed.pool_hash, pool.pool_hash);
-        assert_eq!(packed.candidates.len(), CANDIDATES_PER_POOL);
-
-        // Verify first candidate
-        assert_eq!(
-            packed.candidates[0].rewards_address,
-            pool.candidates[0].rewards_address
-        );
+        assert_eq!(pool.pool_hash, [0x42; 32]);
+        assert_eq!(pool.candidates.len(), CANDIDATES_PER_POOL);
+        assert_eq!(pool.candidates[0].price, U256::from(100u64));
+        assert_eq!(pool.candidates[15].price, U256::from(1600u64));
     }
 }
