@@ -13,10 +13,13 @@ use alloy::providers::fillers::{
 };
 use alloy::providers::{Identity, ProviderBuilder, RootProvider, WalletProvider};
 use alloy::signers::local::{LocalSigner, PrivateKeySigner};
-use evmlib::common::U256;
+use evmlib::common::{Amount, U256};
 use evmlib::contract::network_token::NetworkToken;
 use evmlib::contract::payment_vault::MAX_TRANSFERS_PER_TRANSACTION;
 use evmlib::contract::payment_vault::handler::PaymentVaultHandler;
+use evmlib::merkle_batch_payment::{
+    CANDIDATES_PER_POOL, CandidateNode, PoolCommitment, expected_reward_pools,
+};
 use evmlib::testnet::{deploy_network_token_contract, deploy_payment_vault_contract, start_node};
 use evmlib::transaction_config::TransactionConfig;
 use evmlib::wallet::wallet_address;
@@ -154,4 +157,216 @@ async fn test_pay_for_quotes_on_local() {
         .await;
 
     assert!(result.is_ok(), "Failed with error: {:?}", result.err());
+}
+
+fn make_pool_commitment(price: u64) -> PoolCommitment {
+    let candidates: [CandidateNode; CANDIDATES_PER_POOL] = std::array::from_fn(|i| CandidateNode {
+        rewards_address: alloy::primitives::Address::new([(i + 1) as u8; 20]),
+        price: Amount::from(price),
+    });
+    PoolCommitment {
+        pool_hash: {
+            let mut hash = [0u8; 32];
+            hash[0] = rand::random();
+            hash[1] = rand::random();
+            hash
+        },
+        candidates,
+    }
+}
+
+#[tokio::test]
+async fn test_pay_for_merkle_tree_on_local() {
+    let (_anvil, network_token, mut payment_vault) = setup().await;
+
+    let transaction_config = TransactionConfig::default();
+
+    // Use depth=2 → expected pools = 2^ceil(2/2) = 2
+    let depth: u8 = 2;
+    let num_pools = expected_reward_pools(depth);
+    assert_eq!(num_pools, 2);
+
+    let pool_commitments: Vec<PoolCommitment> =
+        (0..num_pools).map(|_| make_pool_commitment(100)).collect();
+
+    let merkle_payment_timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // Approve the payment vault to spend tokens
+    let _ = network_token
+        .approve(
+            *payment_vault.contract.address(),
+            U256::MAX,
+            &transaction_config,
+        )
+        .await
+        .unwrap();
+
+    // Use the same provider as the network token (funded account)
+    payment_vault.set_provider(network_token.contract.provider().clone());
+
+    let (winner_pool_hash, total_amount, _gas_info) = payment_vault
+        .pay_for_merkle_tree(
+            depth,
+            pool_commitments.clone(),
+            merkle_payment_timestamp,
+            &transaction_config,
+        )
+        .await
+        .expect("pay_for_merkle_tree should succeed");
+
+    // Verify winner pool hash is one of the submitted pools
+    assert!(
+        pool_commitments
+            .iter()
+            .any(|pc| pc.pool_hash == winner_pool_hash),
+        "Winner pool hash should match one of the submitted pools"
+    );
+
+    // Verify total amount: median(100) * 2^2 = 400
+    assert_eq!(total_amount, Amount::from(400u64));
+
+    // Query on-chain payment info and verify
+    let completed = payment_vault
+        .get_completed_merkle_payment(winner_pool_hash)
+        .await
+        .expect("get_completed_merkle_payment should succeed");
+
+    assert_eq!(completed.depth, depth);
+    assert_eq!(completed.merklePaymentTimestamp, merkle_payment_timestamp);
+    assert_eq!(
+        completed.paidNodeAddresses.len(),
+        depth as usize,
+        "Should have paid exactly {depth} nodes"
+    );
+
+    // Each node should receive totalAmount / depth
+    let expected_per_node = total_amount / Amount::from(depth as u64);
+    for paid_node in &completed.paidNodeAddresses {
+        assert_eq!(paid_node.amount, expected_per_node);
+    }
+}
+
+#[tokio::test]
+async fn test_pay_for_merkle_tree_depth_4() {
+    let (_anvil, network_token, mut payment_vault) = setup().await;
+
+    let transaction_config = TransactionConfig::default();
+
+    // Use depth=4 → expected pools = 2^ceil(4/2) = 4
+    let depth: u8 = 4;
+    let num_pools = expected_reward_pools(depth);
+    assert_eq!(num_pools, 4);
+
+    let pool_commitments: Vec<PoolCommitment> =
+        (0..num_pools).map(|_| make_pool_commitment(50)).collect();
+
+    let merkle_payment_timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let _ = network_token
+        .approve(
+            *payment_vault.contract.address(),
+            U256::MAX,
+            &transaction_config,
+        )
+        .await
+        .unwrap();
+
+    payment_vault.set_provider(network_token.contract.provider().clone());
+
+    let (winner_pool_hash, total_amount, _gas_info) = payment_vault
+        .pay_for_merkle_tree(
+            depth,
+            pool_commitments,
+            merkle_payment_timestamp,
+            &transaction_config,
+        )
+        .await
+        .expect("pay_for_merkle_tree depth=4 should succeed");
+
+    // median(50) * 2^4 = 800
+    assert_eq!(total_amount, Amount::from(800u64));
+
+    let completed = payment_vault
+        .get_completed_merkle_payment(winner_pool_hash)
+        .await
+        .expect("get_completed_merkle_payment should succeed");
+
+    assert_eq!(completed.depth, depth);
+    assert_eq!(completed.paidNodeAddresses.len(), 4);
+
+    // Verify all paid node indices are unique and within bounds
+    let paid_indices: Vec<u8> = completed
+        .paidNodeAddresses
+        .iter()
+        .map(|n| n.poolIndex)
+        .collect();
+    let unique_indices: std::collections::HashSet<u8> = paid_indices.iter().copied().collect();
+    assert_eq!(
+        unique_indices.len(),
+        depth as usize,
+        "All paid node indices should be unique"
+    );
+    for idx in &paid_indices {
+        assert!(
+            (*idx as usize) < CANDIDATES_PER_POOL,
+            "Paid node index {idx} should be < {CANDIDATES_PER_POOL}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_pay_for_merkle_tree_duplicate_rejected() {
+    let (_anvil, network_token, mut payment_vault) = setup().await;
+
+    let transaction_config = TransactionConfig::default();
+
+    let depth: u8 = 2;
+    let num_pools = expected_reward_pools(depth);
+    let pool_commitments: Vec<PoolCommitment> =
+        (0..num_pools).map(|_| make_pool_commitment(100)).collect();
+
+    let merkle_payment_timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let _ = network_token
+        .approve(
+            *payment_vault.contract.address(),
+            U256::MAX,
+            &transaction_config,
+        )
+        .await
+        .unwrap();
+
+    payment_vault.set_provider(network_token.contract.provider().clone());
+
+    // First payment should succeed
+    let _ = payment_vault
+        .pay_for_merkle_tree(
+            depth,
+            pool_commitments.clone(),
+            merkle_payment_timestamp,
+            &transaction_config,
+        )
+        .await
+        .expect("first payment should succeed");
+
+    // Second payment with same pools and timestamp should fail (PaymentAlreadyExists)
+    let result = payment_vault
+        .pay_for_merkle_tree(
+            depth,
+            pool_commitments,
+            merkle_payment_timestamp,
+            &transaction_config,
+        )
+        .await;
+
+    assert!(result.is_err(), "Duplicate payment should be rejected");
 }

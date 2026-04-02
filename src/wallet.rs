@@ -169,7 +169,9 @@ impl Wallet {
 
         // Worst-case estimate: median(pool_prices) * 2^depth, take max across pools.
         // Matches the Solidity formula; the only unknown is which pool wins.
-        let estimated_cost = estimate_merkle_cost_local(depth, &pool_commitments);
+        let estimated_cost = self
+            .network
+            .estimate_merkle_payment_cost(depth, &pool_commitments);
         info!("Estimated Merkle tree cost (local): {estimated_cost}");
 
         let wallet_balance = self.balance_of_tokens().await?;
@@ -371,25 +373,6 @@ pub async fn transfer_gas_tokens(
     Ok(tx_hash)
 }
 
-/// Estimate the worst-case cost of a Merkle tree payment locally.
-///
-/// The Solidity contract charges `median16(quotes) * (1 << depth)` for the
-/// winning pool. The only unknown is which pool wins, so the worst case is
-/// the pool with the highest `median(prices) * 2^depth`.
-fn estimate_merkle_cost_local(depth: u8, pool_commitments: &[PoolCommitment]) -> Amount {
-    let multiplier = Amount::from(1u64 << depth);
-    pool_commitments
-        .iter()
-        .map(|pool| {
-            let mut prices: Vec<Amount> = pool.candidates.iter().map(|c| c.price).collect();
-            prices.sort_unstable(); // ascending
-            // Upper median (index 8 of 16) — matches Solidity's median16 (k = 8)
-            prices[prices.len() / 2] * multiplier
-        })
-        .max()
-        .unwrap_or(Amount::ZERO)
-}
-
 /// Contains the payment error and the already succeeded batch payments (if any).
 #[derive(Debug)]
 pub struct PayForQuotesError(pub Error, pub BTreeMap<QuoteHash, TxHash>);
@@ -523,7 +506,7 @@ mod tests {
     use alloy::network::{Ethereum, EthereumWallet, NetworkWallet};
     use alloy::primitives::address;
 
-    use super::estimate_merkle_cost_local;
+    use crate::Network;
     use crate::merkle_batch_payment::{CANDIDATES_PER_POOL, CandidateNode, PoolCommitment};
 
     fn make_pool(prices: [u64; CANDIDATES_PER_POOL]) -> PoolCommitment {
@@ -541,8 +524,9 @@ mod tests {
     fn test_estimate_uniform_prices() {
         // All candidates quote 100, depth=4
         // median=100, total = 100 * 2^4 = 1600
+        let network = Network::ArbitrumOne;
         let pool = make_pool([100; CANDIDATES_PER_POOL]);
-        let cost = estimate_merkle_cost_local(4, &[pool]);
+        let cost = network.estimate_merkle_payment_cost(4, &[pool]);
         assert_eq!(cost, Amount::from(1600u64));
     }
 
@@ -551,9 +535,10 @@ mod tests {
         // Prices 1..=16, sorted ascending: [1,2,...,16]
         // Upper median at index 8 = 9
         // total = 9 * 2^3 = 72
+        let network = Network::ArbitrumOne;
         let prices: [u64; CANDIDATES_PER_POOL] = std::array::from_fn(|i| (i + 1) as u64);
         let pool = make_pool(prices);
-        let cost = estimate_merkle_cost_local(3, &[pool]);
+        let cost = network.estimate_merkle_payment_cost(3, &[pool]);
         assert_eq!(cost, Amount::from(72u64));
     }
 
@@ -562,23 +547,26 @@ mod tests {
         // Pool A: all quote 100 → median=100, total=100*4=400
         // Pool B: all quote 200 → median=200, total=200*4=800
         // Worst case = 800
+        let network = Network::ArbitrumOne;
         let pool_a = make_pool([100; CANDIDATES_PER_POOL]);
         let pool_b = make_pool([200; CANDIDATES_PER_POOL]);
-        let cost = estimate_merkle_cost_local(2, &[pool_a, pool_b]);
+        let cost = network.estimate_merkle_payment_cost(2, &[pool_a, pool_b]);
         assert_eq!(cost, Amount::from(800u64));
     }
 
     #[test]
     fn test_estimate_empty_pools() {
-        let cost = estimate_merkle_cost_local(4, &[]);
+        let network = Network::ArbitrumOne;
+        let cost = network.estimate_merkle_payment_cost(4, &[]);
         assert_eq!(cost, Amount::ZERO);
     }
 
     #[test]
     fn test_estimate_depth_1() {
         // depth=1: total = median * 2^1 = median * 2
+        let network = Network::ArbitrumOne;
         let pool = make_pool([50; CANDIDATES_PER_POOL]);
-        let cost = estimate_merkle_cost_local(1, &[pool]);
+        let cost = network.estimate_merkle_payment_cost(1, &[pool]);
         assert_eq!(cost, Amount::from(100u64));
     }
 
