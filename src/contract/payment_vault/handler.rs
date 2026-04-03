@@ -114,8 +114,10 @@ where
         Ok((winner_pool_hash, total_amount, gas_info))
     }
 
-    /// Get calldata for payForMerkleTree
-    fn pay_for_merkle_tree_calldata<I, T>(
+    /// Get calldata for payForMerkleTree.
+    ///
+    /// Public so external signers can generate calldata without a wallet.
+    pub fn pay_for_merkle_tree_calldata<I, T>(
         &self,
         depth: u8,
         pool_commitments: I,
