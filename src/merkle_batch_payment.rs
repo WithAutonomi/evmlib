@@ -59,6 +59,20 @@ pub struct CandidateNode {
     pub price: Amount,
 }
 
+/// What's stored on-chain (or disk) - indexed by winner_pool_hash
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OnChainPaymentInfo {
+    /// Tree depth
+    pub depth: u8,
+
+    /// Merkle payment timestamp provided by client (unix seconds)
+    /// This is the timestamp that all nodes in the pool used for their quotes
+    pub merkle_payment_timestamp: u64,
+
+    /// Addresses of the 'depth' nodes that were paid, with their pool index and paid amount
+    pub paid_node_addresses: Vec<(RewardsAddress, usize, Amount)>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
