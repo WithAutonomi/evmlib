@@ -74,10 +74,7 @@ pub fn pay_for_quotes_calldata<T: IntoIterator<Item = QuotePayment>>(
     let approve_amount = total_amount;
 
     let provider = http_provider(network.rpc_url().clone());
-    let data_payments = crate::contract::payment_vault::handler::PaymentVaultHandler::new(
-        *network.payment_vault_address(),
-        provider,
-    );
+    let data_payments = PaymentVaultHandler::new(*network.payment_vault_address(), provider);
 
     // Divide transfers over multiple transactions if they exceed the max per transaction.
     let chunks = payments.chunks(MAX_TRANSFERS_PER_TRANSACTION);
