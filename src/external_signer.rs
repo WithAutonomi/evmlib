@@ -10,6 +10,8 @@ use crate::Network;
 use crate::common::{Address, Amount, Calldata, QuoteHash, QuotePayment, U256};
 use crate::contract::network_token::{self, NetworkToken};
 use crate::contract::payment_vault::MAX_TRANSFERS_PER_TRANSACTION;
+use crate::contract::payment_vault::handler::PaymentVaultHandler;
+use crate::merkle_batch_payment::PoolCommitment;
 use crate::utils::http_provider;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -72,10 +74,7 @@ pub fn pay_for_quotes_calldata<T: IntoIterator<Item = QuotePayment>>(
     let approve_amount = total_amount;
 
     let provider = http_provider(network.rpc_url().clone());
-    let data_payments = crate::contract::payment_vault::handler::PaymentVaultHandler::new(
-        *network.payment_vault_address(),
-        provider,
-    );
+    let data_payments = PaymentVaultHandler::new(*network.payment_vault_address(), provider);
 
     // Divide transfers over multiple transactions if they exceed the max per transaction.
     let chunks = payments.chunks(MAX_TRANSFERS_PER_TRANSACTION);
@@ -94,5 +93,54 @@ pub fn pay_for_quotes_calldata<T: IntoIterator<Item = QuotePayment>>(
         to: *data_payments.contract.address(),
         approve_spender,
         approve_amount,
+    })
+}
+
+/// Return type for merkle tree payment calldata generation.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MerklePaymentCalldataReturn {
+    /// Transaction calldata for `payForMerkleTree()`.
+    pub calldata: Calldata,
+    /// Contract address to send the transaction to.
+    pub to: Address,
+    /// Address to approve for token spending.
+    pub approve_spender: Address,
+    /// Estimated total cost for approval.
+    pub approve_amount: Amount,
+    /// Tree depth.
+    pub depth: u8,
+    /// Payment timestamp committed by all candidate nodes.
+    pub merkle_payment_timestamp: u64,
+}
+
+/// Generate calldata for a merkle batch payment without executing it.
+///
+/// This is the external-signer counterpart to `Wallet::pay_for_merkle_tree`.
+/// Returns the raw calldata that an external wallet (MetaMask, WalletConnect, etc.)
+/// should sign and submit as a single transaction.
+///
+/// The `approve_amount` is set to `U256::MAX` since the exact cost depends on
+/// the contract's winner pool selection (which includes `msg.sender` as entropy).
+pub fn pay_for_merkle_tree_calldata(
+    network: &Network,
+    depth: u8,
+    pool_commitments: Vec<PoolCommitment>,
+    merkle_payment_timestamp: u64,
+) -> Result<MerklePaymentCalldataReturn, Error> {
+    let vault_address = *network.payment_vault_address();
+
+    let provider = http_provider(network.rpc_url().clone());
+    let handler = PaymentVaultHandler::new(vault_address, provider);
+
+    let (calldata, to) =
+        handler.pay_for_merkle_tree_calldata(depth, pool_commitments, merkle_payment_timestamp)?;
+
+    Ok(MerklePaymentCalldataReturn {
+        calldata,
+        to,
+        approve_spender: vault_address,
+        approve_amount: Amount::MAX,
+        depth,
+        merkle_payment_timestamp,
     })
 }
