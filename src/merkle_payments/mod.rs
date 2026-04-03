@@ -11,9 +11,6 @@ pub use crate::merkle_batch_payment::{
     expected_reward_pools,
 };
 
-#[cfg(test)]
-pub use crate::merkle_batch_payment::SmartContractError;
-
 // Export payment types (nodes, pools, proofs)
 pub use merkle_payment::{
     MerklePaymentCandidateNode, MerklePaymentCandidatePool, MerklePaymentProof,

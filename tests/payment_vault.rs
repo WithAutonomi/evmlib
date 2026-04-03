@@ -347,26 +347,34 @@ async fn test_pay_for_merkle_tree_duplicate_rejected() {
 
     payment_vault.set_provider(network_token.contract.provider().clone());
 
-    // First payment should succeed
-    let _ = payment_vault
-        .pay_for_merkle_tree(
-            depth,
-            pool_commitments.clone(),
-            merkle_payment_timestamp,
-            &transaction_config,
-        )
-        .await
-        .expect("first payment should succeed");
+    // With 2 pools, each payment randomly picks a winner pool via on-chain entropy
+    // (block.prevrandao, block.timestamp). By pigeonhole, 3 payments guarantee at least
+    // one duplicate winner pool hash, which the contract rejects.
+    let max_attempts = num_pools + 1;
+    let mut saw_duplicate_rejection = false;
 
-    // Second payment with same pools and timestamp should fail (PaymentAlreadyExists)
-    let result = payment_vault
-        .pay_for_merkle_tree(
-            depth,
-            pool_commitments,
-            merkle_payment_timestamp,
-            &transaction_config,
-        )
-        .await;
+    for i in 0..max_attempts {
+        let result = payment_vault
+            .pay_for_merkle_tree(
+                depth,
+                pool_commitments.clone(),
+                merkle_payment_timestamp,
+                &transaction_config,
+            )
+            .await;
 
-    assert!(result.is_err(), "Duplicate payment should be rejected");
+        if result.is_err() {
+            saw_duplicate_rejection = true;
+            break;
+        }
+        assert!(
+            i < num_pools,
+            "Payment {i} succeeded but all {num_pools} pool slots should be filled"
+        );
+    }
+
+    assert!(
+        saw_duplicate_rejection,
+        "Expected at least one duplicate rejection in {max_attempts} attempts"
+    );
 }
