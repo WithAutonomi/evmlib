@@ -7,12 +7,8 @@ mod merkle_tree;
 
 // Re-export types from the merkle_batch_payment module (already in evmlib)
 pub use crate::merkle_batch_payment::{
-    CANDIDATES_PER_POOL, MAX_MERKLE_DEPTH, OnChainPaymentInfo, PoolCommitment,
-    expected_reward_pools,
+    CANDIDATES_PER_POOL, MAX_MERKLE_DEPTH, PoolCommitment, expected_reward_pools,
 };
-
-#[cfg(test)]
-pub use crate::merkle_batch_payment::SmartContractError;
 
 // Export payment types (nodes, pools, proofs)
 pub use merkle_payment::{
