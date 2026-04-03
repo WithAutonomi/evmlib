@@ -81,6 +81,13 @@ pub struct PaymentQuote {
     pub price: Amount,
     /// The node's wallet address
     pub rewards_address: RewardsAddress,
+    /// The quoting node's view of the close group for the content address.
+    ///
+    /// Up to `CLOSE_GROUP_SIZE` peer IDs (raw 32-byte BLAKE3 hashes) that
+    /// this node considers closest to the content address, **excluding itself**.
+    /// Signed as part of the quote to prevent a malicious node from lying
+    /// about its close group view.
+    pub close_group: Vec<[u8; 32]>,
     /// The node's public key in bytes (ML-DSA-65)
     pub pub_key: Vec<u8>,
     /// The node's signature for the quote (ML-DSA-65)
@@ -113,6 +120,7 @@ impl PaymentQuote {
         timestamp: SystemTime,
         price: &Amount,
         rewards_address: &RewardsAddress,
+        close_group: &[[u8; 32]],
     ) -> Vec<u8> {
         let mut bytes = xorname.to_vec();
         let secs = timestamp
@@ -122,6 +130,9 @@ impl PaymentQuote {
         bytes.extend_from_slice(&secs.to_le_bytes());
         bytes.extend_from_slice(&price.to_le_bytes::<32>());
         bytes.extend_from_slice(rewards_address.as_slice());
+        for peer_id in close_group {
+            bytes.extend_from_slice(peer_id);
+        }
         bytes
     }
 
@@ -132,6 +143,7 @@ impl PaymentQuote {
             self.timestamp,
             &self.price,
             &self.rewards_address,
+            &self.close_group,
         )
     }
 }
