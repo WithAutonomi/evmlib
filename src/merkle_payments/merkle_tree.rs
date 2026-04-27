@@ -372,8 +372,23 @@ pub fn midpoint_proof_depth(depth: u8) -> u8 {
     depth.div_ceil(2)
 }
 
+/// Level at which reward-pool midpoints sit, in `ant_merkle`'s level numbering.
+///
+/// `ant_merkle::MerkleTree::get_nodes_at_level(L)` numbers levels from the
+/// leaves up — `L = 0` is the leaf layer, `L = depth` is the root — so a
+/// padded tree of `2^depth` leaves contains `2^(depth - L)` nodes at level `L`.
+///
+/// We need exactly `expected_reward_pools(depth) = 2^ceil(depth/2)` midpoints
+/// to match the on-chain `MerklePaymentLib.expectedRewardPools`. Picking
+/// `L = floor(depth/2)` yields `2^(depth - floor(depth/2)) = 2^ceil(depth/2)`
+/// nodes, matching the contract for both even and odd depths.
+///
+/// Do NOT change this to `depth.div_ceil(2)` to "match" `expected_reward_pools`:
+/// because the level is counted from the leaves, `ceil(depth/2)` halves the
+/// pool count on odd depths and triggers a `WrongPoolCount` revert at the
+/// payment vault.
 fn midpoint_level(depth: u8) -> usize {
-    depth.div_ceil(2) as usize
+    (depth / 2) as usize
 }
 
 /// Errors for Merkle proof verification.
@@ -553,5 +568,148 @@ impl ant_merkle::Hasher for Sha3Hasher {
 
     fn hash_size() -> usize {
         32
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_leaves(count: usize) -> Vec<XorName> {
+        (0..count)
+            .map(|i| {
+                let mut bytes = [0u8; 32];
+                bytes[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                XorName(bytes)
+            })
+            .collect()
+    }
+
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    /// Regression: client-produced midpoint count must equal the on-chain
+    /// `expected_reward_pools(depth)`. Pre-fix this only held for even depths;
+    /// odd depths produced 2^floor(d/2) instead of 2^ceil(d/2), causing
+    /// `WrongPoolCount` reverts at the payment vault for files in the chunk
+    /// bands 5-8 (depth 3), 17-32 (depth 5) and 65-128 (depth 7).
+    #[test]
+    fn reward_candidate_count_matches_contract_for_all_depths() -> TestResult {
+        for leaf_count in MIN_LEAVES..=MAX_LEAVES {
+            let tree = MerkleTree::from_xornames(make_leaves(leaf_count))?;
+            let candidates = tree.reward_candidates(0)?;
+            let expected = expected_reward_pools(tree.depth());
+            assert_eq!(
+                candidates.len(),
+                expected,
+                "leaf_count={leaf_count} depth={} produced {} pools, contract expects {expected}",
+                tree.depth(),
+                candidates.len(),
+            );
+        }
+        Ok(())
+    }
+
+    /// The exact failure observed in production: `WrongPoolCount(16, 8)`.
+    /// 65-128 chunks → depth 7 → contract expects 16 pools; client must send 16.
+    #[test]
+    fn depth_seven_produces_sixteen_pools_not_eight() -> TestResult {
+        for leaf_count in [65usize, 100, 128] {
+            let tree = MerkleTree::from_xornames(make_leaves(leaf_count))?;
+            assert_eq!(tree.depth(), 7, "leaf_count={leaf_count}");
+            let candidates = tree.reward_candidates(0)?;
+            assert_eq!(
+                candidates.len(),
+                16,
+                "leaf_count={leaf_count} should produce 16 pools, got {}",
+                candidates.len(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Smallest odd-depth case: depth=1 (2 leaves) must produce 2 midpoint pools.
+    /// Pre-fix this produced only 1 pool (the root), which would have triggered
+    /// `WrongPoolCount(2, 1)` for any 2-chunk upload.
+    #[test]
+    fn depth_one_produces_two_pools_not_one() -> TestResult {
+        let tree = MerkleTree::from_xornames(make_leaves(2))?;
+        assert_eq!(tree.depth(), 1);
+        let candidates = tree.reward_candidates(0)?;
+        assert_eq!(candidates.len(), 2);
+        Ok(())
+    }
+
+    /// Each midpoint proof must verify against the tree root using the same
+    /// `total_leaves_count` the contract uses (= number of midpoints).
+    #[test]
+    fn every_midpoint_proof_verifies_for_all_depths() -> TestResult {
+        for leaf_count in MIN_LEAVES..=MAX_LEAVES {
+            let tree = MerkleTree::from_xornames(make_leaves(leaf_count))?;
+            let tree_root = tree.root();
+            let candidates = tree.reward_candidates(0)?;
+            for (i, mp) in candidates.iter().enumerate() {
+                assert!(
+                    mp.branch.verify(),
+                    "midpoint {i}/{} failed branch.verify() (leaf_count={leaf_count}, depth={}, branch_root={:?}, tree_root={:?})",
+                    candidates.len(),
+                    tree.depth(),
+                    mp.branch.root(),
+                    tree_root,
+                );
+                assert_eq!(
+                    mp.branch.depth(),
+                    midpoint_proof_depth(tree.depth()) as usize,
+                    "midpoint {i} proof depth mismatch (leaf_count={leaf_count}, depth={})",
+                    tree.depth(),
+                );
+                assert_eq!(
+                    mp.branch.root(),
+                    &tree_root,
+                    "midpoint {i} root divergence (leaf_count={leaf_count})",
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// End-to-end: the production verifier `verify_merkle_proof` must accept
+    /// proofs produced by the fixed client across every supported depth.
+    /// `branch.verify()` alone only checks Merkle hashing — this exercises
+    /// the full set of checks (proof depth, root match, leaf identity, timestamp).
+    #[test]
+    fn verify_merkle_proof_accepts_all_depths() -> TestResult {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+
+        for leaf_count in MIN_LEAVES..=MAX_LEAVES {
+            let leaves = make_leaves(leaf_count);
+            let first_leaf = match leaves.first() {
+                Some(leaf) => *leaf,
+                None => return Err(format!("make_leaves({leaf_count}) returned empty").into()),
+            };
+            let tree = MerkleTree::from_xornames(leaves)?;
+            let address_branch = tree.generate_address_proof(0, first_leaf)?;
+            let candidates = tree.reward_candidates(now)?;
+            let winner = match candidates.first() {
+                Some(c) => c.clone(),
+                None => {
+                    return Err(format!(
+                        "no reward candidates for leaf_count={leaf_count} depth={}",
+                        tree.depth()
+                    )
+                    .into());
+                }
+            };
+            let root = tree.root();
+
+            verify_merkle_proof(
+                &first_leaf,
+                &address_branch,
+                &winner,
+                tree.depth(),
+                &root,
+                now,
+            )?;
+        }
+        Ok(())
     }
 }
