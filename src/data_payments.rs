@@ -85,6 +85,33 @@ pub struct PaymentQuote {
     pub pub_key: Vec<u8>,
     /// The node's signature for the quote (ML-DSA-65)
     pub signature: Vec<u8>,
+    /// ADR-0003: the number of keys in the storage commitment this price was
+    /// derived from. `0` for a baseline (no-commitment) quote. Covered by the
+    /// signature and the quote hash, so it cannot be altered after signing.
+    ///
+    /// Placed at the struct TAIL with `#[serde(default)]` deliberately: rmp's
+    /// default tuple-struct encoding only supplies defaults for MISSING TRAILING
+    /// fields, so appending here is what actually lets an old-format quote
+    /// (which lacks these two fields entirely) decode — `0` / `None` —
+    /// rather than misaligning onto `pub_key`/`signature`.
+    ///
+    /// This is **decode-only compatibility, NOT mixed-fleet acceptance**: an
+    /// old-format quote still decodes, but it then verifies against the new
+    /// 6-field signed payload and so its signature/hash no longer validate.
+    /// ADR-0003 is a hard cutover — the whole fleet and clients upgrade
+    /// together; nothing accepts an old-format signature. The tail-default only
+    /// keeps deserialization total (no panic on short input), not interoperable.
+    #[serde(default)]
+    pub committed_key_count: u32,
+    /// ADR-0003: the pin (commitment hash) of the storage commitment this price
+    /// was derived from. `None` for a baseline (no-commitment) quote; `Some`
+    /// whenever `committed_key_count > 0`. Covered by the signature and the
+    /// quote hash. A verifier resolves this pin to the signed commitment
+    /// (carried as a sidecar, held from gossip, or fetched) to confirm the
+    /// price matches real, auditable storage. Tail-placed for the same
+    /// old-wire-decode reason as `committed_key_count`.
+    #[serde(default)]
+    pub commitment_pin: Option<[u8; 32]>,
 }
 
 impl fmt::Debug for PaymentQuote {
@@ -108,11 +135,21 @@ impl PaymentQuote {
     }
 
     /// Returns the bytes to be signed from the given parameters.
+    ///
+    /// ADR-0003 appends the commitment binding (`committed_key_count` and
+    /// `commitment_pin`) after the original fields. The pin is encoded with a
+    /// one-byte tag (`0` = none, `1` = present) so a baseline quote with no pin
+    /// can never collide with a quote pinning an all-zero hash. Appending keeps
+    /// the original prefix byte-for-byte identical, which matters only for
+    /// reasoning about the format's evolution — the resulting signature and
+    /// quote hash still change, exactly the breaking change ADR-0003 plans for.
     pub fn bytes_for_signing(
         xorname: XorName,
         timestamp: SystemTime,
         price: &Amount,
         rewards_address: &RewardsAddress,
+        committed_key_count: u32,
+        commitment_pin: &Option<[u8; 32]>,
     ) -> Vec<u8> {
         let mut bytes = xorname.to_vec();
         let secs = timestamp
@@ -122,6 +159,14 @@ impl PaymentQuote {
         bytes.extend_from_slice(&secs.to_le_bytes());
         bytes.extend_from_slice(&price.to_le_bytes::<32>());
         bytes.extend_from_slice(rewards_address.as_slice());
+        bytes.extend_from_slice(&committed_key_count.to_le_bytes());
+        match commitment_pin {
+            Some(pin) => {
+                bytes.push(1u8);
+                bytes.extend_from_slice(pin);
+            }
+            None => bytes.push(0u8),
+        }
         bytes
     }
 
@@ -132,6 +177,8 @@ impl PaymentQuote {
             self.timestamp,
             &self.price,
             &self.rewards_address,
+            self.committed_key_count,
+            &self.commitment_pin,
         )
     }
 }
