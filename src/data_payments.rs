@@ -85,7 +85,7 @@ pub struct PaymentQuote {
     pub pub_key: Vec<u8>,
     /// The node's signature for the quote (ML-DSA-65)
     pub signature: Vec<u8>,
-    /// ADR-0003: the number of keys in the storage commitment this price was
+    /// ADR-0004: the number of keys in the storage commitment this price was
     /// derived from. `0` for a baseline (no-commitment) quote. Covered by the
     /// signature and the quote hash, so it cannot be altered after signing.
     ///
@@ -98,12 +98,12 @@ pub struct PaymentQuote {
     /// This is **decode-only compatibility, NOT mixed-fleet acceptance**: an
     /// old-format quote still decodes, but it then verifies against the new
     /// 6-field signed payload and so its signature/hash no longer validate.
-    /// ADR-0003 is a hard cutover — the whole fleet and clients upgrade
+    /// ADR-0004 is a hard cutover — the whole fleet and clients upgrade
     /// together; nothing accepts an old-format signature. The tail-default only
     /// keeps deserialization total (no panic on short input), not interoperable.
     #[serde(default)]
     pub committed_key_count: u32,
-    /// ADR-0003: the pin (commitment hash) of the storage commitment this price
+    /// ADR-0004: the pin (commitment hash) of the storage commitment this price
     /// was derived from. `None` for a baseline (no-commitment) quote; `Some`
     /// whenever `committed_key_count > 0`. Covered by the signature and the
     /// quote hash. A verifier resolves this pin to the signed commitment
@@ -136,13 +136,13 @@ impl PaymentQuote {
 
     /// Returns the bytes to be signed from the given parameters.
     ///
-    /// ADR-0003 appends the commitment binding (`committed_key_count` and
+    /// ADR-0004 appends the commitment binding (`committed_key_count` and
     /// `commitment_pin`) after the original fields. The pin is encoded with a
     /// one-byte tag (`0` = none, `1` = present) so a baseline quote with no pin
     /// can never collide with a quote pinning an all-zero hash. Appending keeps
     /// the original prefix byte-for-byte identical, which matters only for
     /// reasoning about the format's evolution — the resulting signature and
-    /// quote hash still change, exactly the breaking change ADR-0003 plans for.
+    /// quote hash still change, exactly the breaking change ADR-0004 plans for.
     pub fn bytes_for_signing(
         xorname: XorName,
         timestamp: SystemTime,

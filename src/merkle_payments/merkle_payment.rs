@@ -74,14 +74,14 @@ pub struct MerklePaymentCandidateNode {
     /// Signature over `bytes_to_sign`
     pub signature: Vec<u8>,
 
-    /// ADR-0003: the number of keys in the storage commitment this price was
+    /// ADR-0004: the number of keys in the storage commitment this price was
     /// derived from. `0` for a baseline (no-commitment) quote. Tail-placed with
     /// `#[serde(default)]` so an old-format candidate (lacking these fields)
     /// decodes as `0`/`None` rather than misaligning onto `signature`.
     #[serde(default)]
     pub committed_key_count: u32,
 
-    /// ADR-0003: the pin (commitment hash) of the storage commitment this price
+    /// ADR-0004: the pin (commitment hash) of the storage commitment this price
     /// was derived from. `None` for a baseline quote.
     #[serde(default)]
     pub commitment_pin: Option<[u8; 32]>,
@@ -90,7 +90,7 @@ pub struct MerklePaymentCandidateNode {
 impl MerklePaymentCandidateNode {
     /// Get the bytes to sign.
     ///
-    /// ADR-0003: the commitment binding (`committed_key_count`, `commitment_pin`)
+    /// ADR-0004: the commitment binding (`committed_key_count`, `commitment_pin`)
     /// is appended to the signed payload so the per-node ML-DSA-65 signature
     /// covers it — making a count/pin mismatch genuine "two artifacts signed by
     /// the same key" evidence. The pin is tagged (`0` = none, `1` = present) so a
@@ -122,7 +122,7 @@ impl MerklePaymentCandidateNode {
 
     /// Convert to deterministic byte representation for hashing.
     ///
-    /// ADR-0003 fields are included so the commitment binding is covered by the
+    /// ADR-0004 fields are included so the commitment binding is covered by the
     /// pool hash (and therefore the on-chain commitment), not only the
     /// per-node signature.
     pub(crate) fn to_bytes(&self) -> Vec<u8> {
@@ -241,7 +241,7 @@ pub struct MerklePaymentProof {
     /// The winner pool selected by the smart contract
     pub winner_pool: MerklePaymentCandidatePool,
 
-    /// ADR-0003 commitment sidecars: the signed storage commitment each winner
+    /// ADR-0004 commitment sidecars: the signed storage commitment each winner
     /// candidate pinned, as opaque serialized blobs, so a storer can cross-check
     /// a candidate's claimed count against the original commitment synchronously
     /// ("the commitment arrived with the quote"). `evmlib` stays agnostic of the
