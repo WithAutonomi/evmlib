@@ -71,31 +71,74 @@ pub struct MerklePaymentCandidateNode {
     /// Quote timestamp (provided by the client)
     pub merkle_payment_timestamp: u64,
 
-    /// Signature over hash(price || reward_address || timestamp)
+    /// Signature over `bytes_to_sign`
     pub signature: Vec<u8>,
+
+    /// ADR-0004: the number of keys in the storage commitment this price was
+    /// derived from. `0` for a baseline (no-commitment) quote. Tail-placed with
+    /// `#[serde(default)]` so an old-format candidate (lacking these fields)
+    /// decodes as `0`/`None` rather than misaligning onto `signature`.
+    #[serde(default)]
+    pub committed_key_count: u32,
+
+    /// ADR-0004: the pin (commitment hash) of the storage commitment this price
+    /// was derived from. `None` for a baseline quote.
+    #[serde(default)]
+    pub commitment_pin: Option<[u8; 32]>,
 }
 
 impl MerklePaymentCandidateNode {
     /// Get the bytes to sign.
+    ///
+    /// ADR-0004: the commitment binding (`committed_key_count`, `commitment_pin`)
+    /// is appended to the signed payload so the per-node ML-DSA-65 signature
+    /// covers it — making a count/pin mismatch genuine "two artifacts signed by
+    /// the same key" evidence. The pin is tagged (`0` = none, `1` = present) so a
+    /// baseline candidate can never collide with one pinning an all-zero hash.
+    /// This is a coordinated breaking change: `ant-protocol` must verify the same
+    /// 5-field message (its `verify_merkle_candidate_signature` reconstructs this
+    /// exact payload).
     pub fn bytes_to_sign(
         price: &Amount,
         reward_address: &RewardsAddress,
         timestamp: u64,
+        committed_key_count: u32,
+        commitment_pin: &Option<[u8; 32]>,
     ) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&price.to_le_bytes::<32>());
         bytes.extend_from_slice(reward_address.as_slice());
         bytes.extend_from_slice(&timestamp.to_le_bytes());
+        bytes.extend_from_slice(&committed_key_count.to_le_bytes());
+        match commitment_pin {
+            Some(pin) => {
+                bytes.push(1u8);
+                bytes.extend_from_slice(pin);
+            }
+            None => bytes.push(0u8),
+        }
         bytes
     }
 
     /// Convert to deterministic byte representation for hashing.
+    ///
+    /// ADR-0004 fields are included so the commitment binding is covered by the
+    /// pool hash (and therefore the on-chain commitment), not only the
+    /// per-node signature.
     pub(crate) fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&self.pub_key);
         bytes.extend_from_slice(&self.price.to_le_bytes::<32>());
         bytes.extend_from_slice(self.reward_address.as_slice());
         bytes.extend_from_slice(&self.merkle_payment_timestamp.to_le_bytes());
+        bytes.extend_from_slice(&self.committed_key_count.to_le_bytes());
+        match &self.commitment_pin {
+            Some(pin) => {
+                bytes.push(1u8);
+                bytes.extend_from_slice(pin);
+            }
+            None => bytes.push(0u8),
+        }
         bytes.extend_from_slice(&self.signature);
         bytes
     }
@@ -197,6 +240,16 @@ pub struct MerklePaymentProof {
 
     /// The winner pool selected by the smart contract
     pub winner_pool: MerklePaymentCandidatePool,
+
+    /// ADR-0004 commitment sidecars: the signed storage commitment each winner
+    /// candidate pinned, as opaque serialized blobs, so a storer can cross-check
+    /// a candidate's claimed count against the original commitment synchronously
+    /// ("the commitment arrived with the quote"). `evmlib` stays agnostic of the
+    /// commitment type; the node deserializes and validates each. Tail-placed,
+    /// `serde(default)`: an old proof simply carries none and the node falls
+    /// back to gossip/fetch.
+    #[serde(default)]
+    pub commitment_sidecars: Vec<Vec<u8>>,
 }
 
 impl MerklePaymentProof {
@@ -210,6 +263,7 @@ impl MerklePaymentProof {
             address,
             data_proof,
             winner_pool,
+            commitment_sidecars: Vec::new(),
         }
     }
 
