@@ -1,6 +1,10 @@
 // Copyright 2025 MaidSafe.net limited.
 //
-// This SAFE Network Software is licensed to you under The General Public License (GPL), version 3.
+// This Autonomi Software is licensed under the MIT license <LICENSE-MIT or
+// https://opensource.org/licenses/MIT> or the Apache License, Version 2.0
+// <LICENSE-APACHE or https://www.apache.org/licenses/LICENSE-2.0>, at your
+// option. This file may not be copied, modified, or distributed except
+// according to those terms.
 
 use crate::common::{Address as RewardsAddress, Amount};
 use crate::merkle_batch_payment::{CANDIDATES_PER_POOL, CandidateNode, PoolCommitment, PoolHash};
