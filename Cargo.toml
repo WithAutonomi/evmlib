@@ -6,7 +6,7 @@ homepage = "https://autonomi.com"
 license = "MIT OR Apache-2.0"
 name = "evmlib"
 repository = "https://github.com/WithAutonomi/evmlib"
-version = "0.9.0"
+version = "0.9.1-rc.1"
 
 [features]
 external-signer = []
