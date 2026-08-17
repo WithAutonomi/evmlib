@@ -8,18 +8,22 @@ library MerklePaymentLib {
         return 1 << halfDepth; // 2^halfDepth
     }
 
-    /// Select winner pool using deterministic pseudo-randomness
+    /// Select winner pool using deterministic pseudo-randomness.
+    /// treeIndex decorrelates trees paid within one payForMerkleTrees call
+    /// (identical block entropy, sender and timestamp).
     function selectWinnerPool(
         uint256 poolCount,
         address sender,
-        uint64 timestamp
+        uint64 timestamp,
+        uint256 treeIndex
     ) internal view returns (uint256) {
         bytes32 seed = keccak256(
             abi.encodePacked(
                 block.prevrandao,
                 block.timestamp,
                 sender,
-                timestamp
+                timestamp,
+                treeIndex
             )
         );
         return uint256(seed) % poolCount;

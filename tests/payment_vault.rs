@@ -2,6 +2,7 @@
 
 mod common;
 
+use crate::common::merkle::deterministic_tree;
 use crate::common::quote::random_quote_payment;
 use alloy::network::{Ethereum, EthereumWallet};
 use alloy::node_bindings::AnvilInstance;
@@ -377,4 +378,204 @@ async fn test_pay_for_merkle_tree_duplicate_rejected() {
         saw_duplicate_rejection,
         "Expected at least one duplicate rejection in {max_attempts} attempts"
     );
+}
+
+#[tokio::test]
+async fn test_pay_for_merkle_trees_on_local() {
+    let (_anvil, network_token, mut payment_vault) = setup().await;
+
+    let transaction_config = TransactionConfig::default();
+
+    let merkle_payment_timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // Three trees with distinct depths and prices, paid in one transaction
+    let trees = vec![
+        deterministic_tree(2, 100, 100, merkle_payment_timestamp),
+        deterministic_tree(4, 50, 200, merkle_payment_timestamp),
+        deterministic_tree(2, 200, 300, merkle_payment_timestamp),
+    ];
+
+    let _ = network_token
+        .approve(
+            *payment_vault.contract.address(),
+            U256::MAX,
+            &transaction_config,
+        )
+        .await
+        .unwrap();
+
+    payment_vault.set_provider(network_token.contract.provider().clone());
+
+    let (payments, _gas_info) = payment_vault
+        .pay_for_merkle_trees(trees.clone(), &transaction_config)
+        .await
+        .expect("pay_for_merkle_trees should succeed");
+
+    assert_eq!(payments.len(), 3, "one (winner, amount) per tree");
+
+    for (i, (winner_pool_hash, amount)) in payments.iter().enumerate() {
+        let tree = &trees[i];
+
+        assert!(
+            tree.pool_commitments
+                .iter()
+                .any(|pc| pc.pool_hash == *winner_pool_hash),
+            "winner of tree {i} should come from that tree's pools"
+        );
+
+        // Uniform prices per tree: cost = price * 2^depth
+        let price = tree.pool_commitments[0].candidates[0].price;
+        assert_eq!(
+            *amount,
+            price * Amount::from(1u64 << tree.depth),
+            "tree {i} amount"
+        );
+
+        let completed = payment_vault
+            .get_completed_merkle_payment(*winner_pool_hash)
+            .await
+            .expect("payment should be stored on-chain");
+        assert_eq!(completed.depth, tree.depth);
+        assert_eq!(completed.merklePaymentTimestamp, merkle_payment_timestamp);
+        assert_eq!(completed.paidNodeAddresses.len(), tree.depth as usize);
+    }
+}
+
+#[tokio::test]
+async fn test_pay_for_merkle_trees_duplicate_rejected() {
+    let (_anvil, network_token, mut payment_vault) = setup().await;
+
+    let transaction_config = TransactionConfig::default();
+
+    let merkle_payment_timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // Every pool of both trees shares one hash, so both trees resolve to the
+    // same winner regardless of on-chain entropy — the second tree must
+    // revert the whole transaction.
+    let mut tree_a = deterministic_tree(2, 100, 400, merkle_payment_timestamp);
+    let dup_hash = tree_a.pool_commitments[0].pool_hash;
+    for pc in &mut tree_a.pool_commitments {
+        pc.pool_hash = dup_hash;
+    }
+    let tree_b = tree_a.clone();
+
+    let _ = network_token
+        .approve(
+            *payment_vault.contract.address(),
+            U256::MAX,
+            &transaction_config,
+        )
+        .await
+        .unwrap();
+
+    payment_vault.set_provider(network_token.contract.provider().clone());
+
+    let err = payment_vault
+        .pay_for_merkle_trees(vec![tree_a, tree_b], &transaction_config)
+        .await
+        .expect_err("duplicate winner within one batch should fail");
+
+    match err {
+        evmlib::contract::payment_vault::error::Error::PaymentAlreadyExists(hash) => {
+            assert_eq!(hash, hex::encode(dup_hash));
+        }
+        other => panic!("expected PaymentAlreadyExists, got {other:?}"),
+    }
+
+    // All-or-nothing: the first tree's payment must not persist either
+    assert!(
+        payment_vault
+            .get_completed_merkle_payment(dup_hash)
+            .await
+            .is_err(),
+        "no payment should be stored after the revert"
+    );
+}
+
+#[cfg(feature = "external-signer")]
+#[tokio::test]
+async fn test_pay_for_merkle_trees_external_signer_calldata() {
+    use alloy::network::TransactionBuilder;
+    use alloy::providers::Provider;
+    use alloy::rpc::types::TransactionRequest;
+    use evmlib::Network;
+
+    let (anvil, network_token, mut payment_vault) = setup().await;
+
+    let transaction_config = TransactionConfig::default();
+
+    let network = Network::new_custom(
+        &anvil.endpoint(),
+        &network_token.contract.address().to_string(),
+        &payment_vault.contract.address().to_string(),
+    );
+
+    let merkle_payment_timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let trees = vec![
+        deterministic_tree(2, 100, 500, merkle_payment_timestamp),
+        deterministic_tree(2, 150, 600, merkle_payment_timestamp),
+    ];
+
+    let calldata_return =
+        evmlib::external_signer::pay_for_merkle_trees_calldata(&network, trees.clone())
+            .expect("calldata generation should succeed");
+
+    assert_eq!(calldata_return.tree_count, 2);
+    assert_eq!(calldata_return.to, *payment_vault.contract.address());
+    assert_eq!(
+        calldata_return.approve_spender,
+        *payment_vault.contract.address()
+    );
+
+    // Approve, then submit the raw calldata from the funded genesis account —
+    // exactly what an external wallet does with this return value.
+    let _ = network_token
+        .approve(
+            *payment_vault.contract.address(),
+            U256::MAX,
+            &transaction_config,
+        )
+        .await
+        .unwrap();
+
+    payment_vault.set_provider(network_token.contract.provider().clone());
+
+    let provider = network_token.contract.provider();
+    let tx = TransactionRequest::default()
+        .with_to(calldata_return.to)
+        .with_input(calldata_return.calldata.clone());
+
+    let receipt = provider
+        .send_transaction(tx)
+        .await
+        .expect("raw calldata transaction should send")
+        .get_receipt()
+        .await
+        .expect("receipt should be available");
+    assert!(receipt.status(), "batched payment tx should succeed");
+
+    // Exactly one pool per tree must be stored on-chain, with that tree's depth
+    for (i, tree) in trees.iter().enumerate() {
+        let mut stored = 0;
+        for pc in &tree.pool_commitments {
+            if let Ok(info) = payment_vault
+                .get_completed_merkle_payment(pc.pool_hash)
+                .await
+            {
+                assert_eq!(info.depth, tree.depth, "tree {i} stored depth");
+                stored += 1;
+            }
+        }
+        assert_eq!(stored, 1, "tree {i} should have exactly one paid pool");
+    }
 }

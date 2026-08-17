@@ -11,7 +11,7 @@ use crate::contract::network_token::NetworkToken;
 use crate::contract::payment_vault::MAX_TRANSFERS_PER_TRANSACTION;
 use crate::contract::payment_vault::handler::PaymentVaultHandler;
 use crate::contract::{network_token, payment_vault};
-use crate::merkle_batch_payment::{PoolCommitment, PoolHash};
+use crate::merkle_batch_payment::{MerkleTreePayment, PoolCommitment, PoolHash};
 use crate::retry::GasInfo;
 use crate::transaction_config::TransactionConfig;
 use crate::utils::http_provider;
@@ -207,6 +207,61 @@ impl Wallet {
         );
 
         Ok((winner_pool_hash, actual_amount, gas_info))
+    }
+
+    /// Pay for multiple Merkle trees in a single transaction.
+    ///
+    /// Estimates the summed cost locally from candidate prices, validates
+    /// balance and allowance, then submits all trees in one atomic
+    /// `payForMerkleTrees` call.
+    ///
+    /// Returns the per-tree (winner pool hash, amount paid) aligned to the
+    /// input tree order, and gas info for the single transaction.
+    pub async fn pay_for_merkle_trees(
+        &self,
+        trees: Vec<MerkleTreePayment>,
+    ) -> Result<(Vec<(PoolHash, Amount)>, GasInfo), Error> {
+        let vault_address = *self.network.payment_vault_address();
+
+        // Worst-case estimate: sum of the per-tree worst cases.
+        let estimated_cost = trees.iter().fold(Amount::ZERO, |acc, tree| {
+            acc + self
+                .network
+                .estimate_merkle_payment_cost(tree.depth, &tree.pool_commitments)
+        });
+        info!(
+            "Estimated cost for {} Merkle trees (local): {estimated_cost}",
+            trees.len()
+        );
+
+        let wallet_balance = self.balance_of_tokens().await?;
+        if wallet_balance < estimated_cost {
+            return Err(Error::InsufficientTokensForQuotes(
+                wallet_balance,
+                estimated_cost,
+            ));
+        }
+
+        let allowance = self.token_allowance(vault_address).await?;
+        if allowance < estimated_cost {
+            info!("Approving payment vault to spend tokens");
+            self.approve_to_spend_tokens(vault_address, U256::MAX)
+                .await?;
+        }
+
+        let provider = self.to_provider();
+        let handler = PaymentVaultHandler::new(vault_address, provider);
+
+        let (payments, gas_info) = handler
+            .pay_for_merkle_trees(trees, &self.transaction_config)
+            .await?;
+
+        info!(
+            "Batched Merkle payment successful for {} trees",
+            payments.len()
+        );
+
+        Ok((payments, gas_info))
     }
 
     /// Build a provider using this wallet.

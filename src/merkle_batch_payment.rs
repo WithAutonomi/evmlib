@@ -25,6 +25,20 @@ pub const CANDIDATES_PER_POOL: usize = 16;
 /// Maximum supported Merkle tree depth
 pub const MAX_MERKLE_DEPTH: u8 = 8;
 
+/// Maximum number of trees the contract accepts in one `payForMerkleTrees`
+/// call — must match `PaymentVaultV2.MAX_TREES_PER_PAYMENT`
+pub const MAX_TREES_PER_PAYMENT: usize = 16;
+
+/// Recommended number of trees per `payForMerkleTrees` transaction.
+///
+/// A depth-8 tree is ~17 KiB of ABI calldata while the Arbitrum sequencer
+/// caps transactions at 95,000 bytes (`TxMaxDataSize`), so 4 trees per call
+/// keeps a comfortable margin. Consumers should chunk tree batches by this
+/// constant rather than hardcoding it.
+pub const MERKLE_TREES_PER_PAYMENT: usize = 4;
+
+const _: () = assert!(MERKLE_TREES_PER_PAYMENT <= MAX_TREES_PER_PAYMENT);
+
 /// Calculate expected number of reward pools for a given tree depth
 ///
 /// Formula: 2^ceil(depth/2) — must match `MerklePaymentLib.expectedRewardPools` in Solidity
@@ -57,6 +71,19 @@ pub struct CandidateNode {
 
     /// Node-calculated price
     pub price: Amount,
+}
+
+/// A single tree in a batched `payForMerkleTrees` call
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MerkleTreePayment {
+    /// Tree depth
+    pub depth: u8,
+
+    /// Payment timestamp committed by all candidate nodes (unix seconds)
+    pub merkle_payment_timestamp: u64,
+
+    /// Pool commitments, one per reward pool (`expected_reward_pools(depth)`)
+    pub pool_commitments: Vec<PoolCommitment>,
 }
 
 /// What's stored on-chain (or disk) - indexed by winner_pool_hash
