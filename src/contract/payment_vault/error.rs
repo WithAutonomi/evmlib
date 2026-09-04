@@ -23,6 +23,8 @@ pub enum Error {
     PaymentAlreadyExists(String),
     #[error("Payment not found for pool hash: {0}")]
     PaymentNotFound(String),
+    #[error("Too many trees in one payment: provided {provided}, max {max_trees}")]
+    TooManyTrees { provided: u64, max_trees: u64 },
     #[error("Wrong pool count: expected {expected}, got {actual}")]
     WrongPoolCount { expected: u64, actual: u64 },
 }
@@ -65,12 +67,22 @@ impl Error {
             IPaymentVaultErrors::PaymentAlreadyExists(e) => {
                 Self::PaymentAlreadyExists(hex::encode(e.winnerPoolHash))
             }
+            IPaymentVaultErrors::TooManyTrees(e) => Self::TooManyTrees {
+                provided: e.provided.try_into().unwrap_or(u64::MAX),
+                max_trees: e.maxTrees.try_into().unwrap_or(u64::MAX),
+            },
             IPaymentVaultErrors::WrongPoolCount(e) => Self::WrongPoolCount {
                 expected: e.expected.try_into().unwrap_or(u64::MAX),
                 actual: e.actual.try_into().unwrap_or(u64::MAX),
             },
             IPaymentVaultErrors::SafeERC20FailedOperation(e) => {
                 Self::Rpc(format!("SafeERC20 transfer failed for token: {}", e.token))
+            }
+            IPaymentVaultErrors::OwnableUnauthorizedAccount(e) => {
+                Self::Rpc(format!("Ownable: unauthorized account {}", e.account))
+            }
+            IPaymentVaultErrors::OwnableInvalidOwner(e) => {
+                Self::Rpc(format!("Ownable: invalid owner {}", e.owner))
             }
         }
     }

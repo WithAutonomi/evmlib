@@ -30,6 +30,13 @@ struct PoolCommitment {
     CandidateNode[16] candidates; // Fixed size: always 16
 }
 
+/// A single tree in a batched payForMerkleTrees call
+struct MerkleTreePayment {
+    uint8 depth; // Merkle tree depth
+    uint64 merklePaymentTimestamp; // Payment timestamp
+    PoolCommitment[] poolCommitments; // One commitment per reward pool
+}
+
 struct DataPayment {
     address rewardsAddress;
     uint256 amount;

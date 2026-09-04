@@ -34,6 +34,16 @@ impl From<crate::merkle_batch_payment::PoolCommitment> for IPaymentVault::PoolCo
     }
 }
 
+impl From<crate::merkle_batch_payment::MerkleTreePayment> for IPaymentVault::MerkleTreePayment {
+    fn from(tree: crate::merkle_batch_payment::MerkleTreePayment) -> Self {
+        Self {
+            depth: tree.depth,
+            merklePaymentTimestamp: tree.merkle_payment_timestamp,
+            poolCommitments: tree.pool_commitments.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 impl From<crate::merkle_batch_payment::CandidateNode> for IPaymentVault::CandidateNode {
     fn from(node: crate::merkle_batch_payment::CandidateNode) -> Self {
         Self {

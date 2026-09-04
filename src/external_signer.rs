@@ -11,7 +11,7 @@ use crate::common::{Address, Amount, Calldata, QuoteHash, QuotePayment, U256};
 use crate::contract::network_token::{self, NetworkToken};
 use crate::contract::payment_vault::MAX_TRANSFERS_PER_TRANSACTION;
 use crate::contract::payment_vault::handler::PaymentVaultHandler;
-use crate::merkle_batch_payment::PoolCommitment;
+use crate::merkle_batch_payment::{MerkleTreePayment, PoolCommitment};
 use crate::utils::http_provider;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -142,5 +142,51 @@ pub fn pay_for_merkle_tree_calldata(
         approve_amount: Amount::MAX,
         depth,
         merkle_payment_timestamp,
+    })
+}
+
+/// Return type for batched merkle tree payment calldata generation.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MerkleTreesPaymentCalldataReturn {
+    /// Transaction calldata for `payForMerkleTrees()`.
+    pub calldata: Calldata,
+    /// Contract address to send the transaction to.
+    pub to: Address,
+    /// Address to approve for token spending.
+    pub approve_spender: Address,
+    /// Estimated total cost for approval.
+    pub approve_amount: Amount,
+    /// Number of trees paid by the calldata; the transaction emits one
+    /// `MerklePaymentMade` event per tree, in input order.
+    pub tree_count: usize,
+}
+
+/// Generate calldata paying for multiple merkle trees in one transaction,
+/// without executing it.
+///
+/// This is the external-signer counterpart to `Wallet::pay_for_merkle_trees`.
+/// The whole batch is atomic: one wallet confirmation pays every tree, and
+/// any invalid tree reverts the entire transaction.
+///
+/// The `approve_amount` is set to `U256::MAX` since the exact cost depends on
+/// the contract's winner pool selection (which includes `msg.sender` as entropy).
+pub fn pay_for_merkle_trees_calldata(
+    network: &Network,
+    trees: Vec<MerkleTreePayment>,
+) -> Result<MerkleTreesPaymentCalldataReturn, Error> {
+    let vault_address = *network.payment_vault_address();
+
+    let provider = http_provider(network.rpc_url().clone());
+    let handler = PaymentVaultHandler::new(vault_address, provider);
+
+    let tree_count = trees.len();
+    let (calldata, to) = handler.pay_for_merkle_trees_calldata(trees)?;
+
+    Ok(MerkleTreesPaymentCalldataReturn {
+        calldata,
+        to,
+        approve_spender: vault_address,
+        approve_amount: Amount::MAX,
+        tree_count,
     })
 }

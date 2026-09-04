@@ -2,6 +2,9 @@
 cache/
 out/
 
+# forge build output dirs; only the flat, committed artifact JSONs are tracked
+artifacts/*/
+
 target/
 Cargo.lock
 

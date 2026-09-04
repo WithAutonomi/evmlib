@@ -209,12 +209,31 @@ where
 
     // Estimate gas and add 20% buffer to avoid out-of-gas reverts
     // This is especially important for Arbitrum L2 where gas estimation can be tricky
-    let estimated_gas = provider
-        .estimate_gas(transaction_request.clone())
-        .await
-        .map_err(|e| {
-            TransactionError::TransactionFailedToSend(format!("gas estimation failed: {e}"))
-        })?;
+    let estimated_gas = match provider.estimate_gas(transaction_request.clone()).await {
+        Ok(estimated_gas) => estimated_gas,
+        Err(err) => {
+            // Deterministic reverts (e.g. PaymentAlreadyExists) surface at
+            // estimation time as RPC error responses carrying the revert
+            // data. Preserve it as TransactionReverted so contract-specific
+            // errors stay decodable and the caller does not retry a
+            // transaction that will always revert.
+            let revert_data = err
+                .as_error_resp()
+                .and_then(|payload| payload.as_revert_data());
+
+            return if revert_data.is_some() {
+                Err(TransactionError::TransactionReverted {
+                    message: format!("gas estimation failed: {err}"),
+                    revert_data,
+                    nonce,
+                })
+            } else {
+                Err(TransactionError::TransactionFailedToSend(format!(
+                    "gas estimation failed: {err}"
+                )))
+            };
+        }
+    };
     let gas_with_buffer = estimated_gas.saturating_mul(120) / 100;
     debug!("Estimated gas: {estimated_gas}, with 20% buffer: {gas_with_buffer}");
     transaction_request.set_gas_limit(gas_with_buffer);
@@ -245,7 +264,23 @@ where
 
     let pending_tx_builder = match pending_tx_builder_result {
         Ok(Ok(pending_tx_builder)) => pending_tx_builder,
-        Ok(Err(err)) => return Err(TransactionError::TransactionFailedToSend(err.to_string())),
+        Ok(Err(err)) => {
+            // Same as gas estimation: keep revert data decodable if the node
+            // rejected the transaction with an execution revert.
+            let revert_data = err
+                .as_error_resp()
+                .and_then(|payload| payload.as_revert_data());
+
+            return if revert_data.is_some() {
+                Err(TransactionError::TransactionReverted {
+                    message: err.to_string(),
+                    revert_data,
+                    nonce,
+                })
+            } else {
+                Err(TransactionError::TransactionFailedToSend(err.to_string()))
+            };
+        }
         Err(_) => {
             return Err(TransactionError::TransactionFailedToSend(
                 "timeout".to_string(),

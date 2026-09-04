@@ -2,6 +2,7 @@
 
 mod common;
 
+use crate::common::merkle::deterministic_tree;
 use crate::common::quote::random_quote_payment;
 use alloy::network::EthereumWallet;
 use alloy::node_bindings::AnvilInstance;
@@ -107,4 +108,45 @@ async fn test_pay_for_quotes() {
             .mul(QUOTES_PER_CHUNK)
             .div_ceil(MAX_TRANSFERS_PER_TRANSACTION)
     );
+}
+
+#[tokio::test]
+async fn test_pay_for_merkle_trees() {
+    let (_anvil, network, genesis_wallet) = local_testnet().await;
+    let wallet = funded_wallet(&network, genesis_wallet).await;
+
+    let merkle_payment_timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time went backwards")
+        .as_secs();
+
+    // Two trees paid with a single transaction (single allowance + tx flow)
+    let trees = vec![
+        deterministic_tree(2, 100, 700, merkle_payment_timestamp),
+        deterministic_tree(4, 50, 800, merkle_payment_timestamp),
+    ];
+
+    let (payments, _gas_info) = wallet
+        .pay_for_merkle_trees(trees.clone())
+        .await
+        .expect("wallet pay_for_merkle_trees should succeed");
+
+    assert_eq!(payments.len(), 2, "one (winner, amount) per tree");
+
+    for (i, (winner_pool_hash, amount)) in payments.iter().enumerate() {
+        assert!(
+            trees[i]
+                .pool_commitments
+                .iter()
+                .any(|pc| pc.pool_hash == *winner_pool_hash),
+            "winner of tree {i} should come from that tree's pools"
+        );
+
+        let price = trees[i].pool_commitments[0].candidates[0].price;
+        assert_eq!(
+            *amount,
+            price * Amount::from(1u64 << trees[i].depth),
+            "tree {i} amount"
+        );
+    }
 }

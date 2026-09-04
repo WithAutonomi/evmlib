@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity 0.8.33;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 
 import {
     PaidNode,
@@ -10,6 +11,7 @@ import {
     CompletedPayment,
     CandidateNode,
     PoolCommitment,
+    MerkleTreePayment,
     DataPayment,
     PaymentVerificationResult
 } from "./Types.sol";
@@ -19,9 +21,9 @@ import {IPaymentVaultV2} from "./IPaymentVaultV2.sol";
 
 /// @title PaymentVaultV2
 /// @notice Unified payment vault for both single-node and merkle batch payments.
-///         No proxy, no Ownable — for local Anvil testing.
+///         Plain (non-proxy) contract; Ownable guards setBatchLimit only.
 ///         Nodes calculate their own prices as (chunks_stored / 6000)^2.
-contract PaymentVaultV2 is IPaymentVaultV2 {
+contract PaymentVaultV2 is IPaymentVaultV2, Ownable {
     using SafeERC20 for IERC20;
 
     IERC20 public antToken;
@@ -39,7 +41,11 @@ contract PaymentVaultV2 is IPaymentVaultV2 {
     /// Number of candidates per pool (fixed)
     uint8 public constant CANDIDATES_PER_POOL = 16;
 
-    constructor(IERC20 _antToken, uint256 _batchLimit) {
+    /// Maximum number of trees accepted by payForMerkleTrees; the public
+    /// getter doubles as the client feature probe against old deployments
+    uint8 public constant MAX_TREES_PER_PAYMENT = 16;
+
+    constructor(IERC20 _antToken, uint256 _batchLimit) Ownable(msg.sender) {
         if (address(_antToken) == address(0)) {
             revert AntTokenNull();
         }
@@ -53,6 +59,53 @@ contract PaymentVaultV2 is IPaymentVaultV2 {
         PoolCommitment[] calldata poolCommitments,
         uint64 merklePaymentTimestamp
     ) external returns (bytes32 winnerPoolHash, uint256 totalAmount) {
+        return
+            _payForMerkleTree(depth, poolCommitments, merklePaymentTimestamp, 0);
+    }
+
+    /// Pay for up to MAX_TREES_PER_PAYMENT merkle trees atomically.
+    ///
+    /// Trees are processed in input order; any failing tree (depth, pool
+    /// count, duplicate winner pool, transfer failure) reverts the whole
+    /// call. One MerklePaymentMade event is emitted per tree, in input
+    /// order, so clients attribute event -> tree by log order.
+    function payForMerkleTrees(
+        MerkleTreePayment[] calldata trees
+    ) external returns (bytes32[] memory winnerPoolHashes, uint256 totalAmount) {
+        uint256 treesLen = trees.length;
+
+        if (treesLen == 0) {
+            revert InvalidInputLength();
+        }
+        if (treesLen > MAX_TREES_PER_PAYMENT) {
+            revert TooManyTrees(treesLen, MAX_TREES_PER_PAYMENT);
+        }
+
+        winnerPoolHashes = new bytes32[](treesLen);
+
+        for (uint256 i = 0; i < treesLen; i++) {
+            MerkleTreePayment calldata tree = trees[i];
+
+            (bytes32 treeWinnerPoolHash, uint256 treeAmount) = _payForMerkleTree(
+                tree.depth,
+                tree.poolCommitments,
+                tree.merklePaymentTimestamp,
+                i
+            );
+
+            winnerPoolHashes[i] = treeWinnerPoolHash;
+            totalAmount += treeAmount;
+        }
+
+        return (winnerPoolHashes, totalAmount);
+    }
+
+    function _payForMerkleTree(
+        uint8 depth,
+        PoolCommitment[] calldata poolCommitments,
+        uint64 merklePaymentTimestamp,
+        uint256 treeIndex
+    ) internal returns (bytes32 winnerPoolHash, uint256 totalAmount) {
         // check that the depth is less than max allowed depth
         if (depth > MAX_MERKLE_DEPTH) {
             revert DepthTooLarge(depth, MAX_MERKLE_DEPTH);
@@ -68,7 +121,8 @@ contract PaymentVaultV2 is IPaymentVaultV2 {
         uint256 winnerPoolIdx = MerklePaymentLib.selectWinnerPool(
             poolCommitments.length,
             msg.sender,
-            merklePaymentTimestamp
+            merklePaymentTimestamp,
+            treeIndex
         );
         PoolCommitment memory winnerPool = poolCommitments[winnerPoolIdx];
         winnerPoolHash = winnerPool.poolHash;
@@ -207,6 +261,10 @@ contract PaymentVaultV2 is IPaymentVaultV2 {
         bytes32 winnerHash
     ) external view returns (CompletedMerklePayment memory) {
         return completedMerklePayments[winnerHash];
+    }
+
+    function setBatchLimit(uint256 _newBatchLimit) external onlyOwner {
+        batchLimit = _newBatchLimit;
     }
 
     function getFirst16Bytes(address addr) internal pure returns (bytes16) {

@@ -98,7 +98,10 @@ where
             .send_transaction_and_handle_errors(calldata, to, transaction_config)
             .await?;
 
-        let event = self.get_merkle_payment_event(tx_hash).await?;
+        let events = self.get_merkle_payment_events(tx_hash, 1).await?;
+        let event = events.into_iter().next().ok_or_else(|| {
+            Error::Rpc("MerklePaymentMade event not found in transaction".to_string())
+        })?;
 
         let winner_pool_hash = event.winnerPoolHash.0;
         let total_amount = event.totalAmount;
@@ -141,6 +144,65 @@ where
         Ok((calldata, *self.contract.address()))
     }
 
+    /// Pay for multiple Merkle trees in a single transaction.
+    ///
+    /// Sends `payForMerkleTrees`; the contract processes trees in input order,
+    /// all-or-nothing, and emits one `MerklePaymentMade` event per tree in
+    /// input order.
+    ///
+    /// # Returns
+    /// * Tuple of (per-tree (winner pool hash, amount paid), gas info); the
+    ///   vector is aligned to the input tree order
+    pub async fn pay_for_merkle_trees<I, T>(
+        &self,
+        trees: I,
+        transaction_config: &TransactionConfig,
+    ) -> Result<(Vec<(PoolHash, Amount)>, GasInfo), Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<IPaymentVault::MerkleTreePayment>,
+    {
+        let trees: Vec<IPaymentVault::MerkleTreePayment> =
+            trees.into_iter().map(Into::into).collect();
+        let tree_count = trees.len();
+
+        debug!("Paying for {tree_count} Merkle trees in one transaction");
+
+        let (calldata, to) = self.pay_for_merkle_trees_calldata(trees)?;
+
+        let (tx_hash, gas_info) = self
+            .send_transaction_and_handle_errors(calldata, to, transaction_config)
+            .await?;
+
+        let events = self.get_merkle_payment_events(tx_hash, tree_count).await?;
+
+        let payments = events
+            .into_iter()
+            .map(|event| (event.winnerPoolHash.0, event.totalAmount))
+            .collect();
+
+        Ok((payments, gas_info))
+    }
+
+    /// Get calldata for payForMerkleTrees.
+    ///
+    /// Public so external signers can generate calldata without a wallet.
+    pub fn pay_for_merkle_trees_calldata<I, T>(
+        &self,
+        trees: I,
+    ) -> Result<(Calldata, Address), Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<IPaymentVault::MerkleTreePayment>,
+    {
+        let trees: Vec<IPaymentVault::MerkleTreePayment> =
+            trees.into_iter().map(Into::into).collect();
+
+        let calldata = self.contract.payForMerkleTrees(trees).calldata().to_owned();
+
+        Ok((calldata, *self.contract.address()))
+    }
+
     /// Get completed merkle payment info for a winner pool hash.
     ///
     /// Calls `getCompletedMerklePayment` on the contract, which returns
@@ -179,14 +241,17 @@ where
 
     // ── Private helpers ─────────────────────────────────────────────────
 
-    /// Get the MerklePaymentMade event from a transaction hash with retry logic.
+    /// Get the MerklePaymentMade events from a transaction hash with retry logic.
     ///
-    /// Retries up to 2 times with exponential backoff if the event is not found
+    /// Expects exactly `expected` events (one per tree paid) and returns them
+    /// in log order, which matches the contract's input (tree) order. Retries
+    /// up to 2 times with exponential backoff if the events are not found
     /// immediately (handles cases where the transaction may not be fully indexed).
-    async fn get_merkle_payment_event(
+    async fn get_merkle_payment_events(
         &self,
         tx_hash: TxHash,
-    ) -> Result<IPaymentVault::MerklePaymentMade, Error> {
+        expected: usize,
+    ) -> Result<Vec<IPaymentVault::MerklePaymentMade>, Error> {
         const MAX_ATTEMPTS: u32 = 3;
         const INITIAL_DELAY_MS: u64 = 500;
         const MAX_DELAY_MS: u64 = 8000;
@@ -201,14 +266,14 @@ where
         let mut attempt = 1;
 
         for duration_opt in backoff {
-            match self.try_get_merkle_payment_event(tx_hash).await {
-                Ok(event) => return Ok(event),
+            match self.try_get_merkle_payment_events(tx_hash, expected).await {
+                Ok(events) => return Ok(events),
                 Err(e) => {
                     last_error = Some(e);
 
                     if let Some(duration) = duration_opt {
                         debug!(
-                            "Failed to get MerklePaymentMade event (attempt {}/{}), retrying in {}ms",
+                            "Failed to get MerklePaymentMade events (attempt {}/{}), retrying in {}ms",
                             attempt,
                             MAX_ATTEMPTS,
                             duration.as_millis()
@@ -221,15 +286,17 @@ where
         }
 
         Err(last_error.unwrap_or_else(|| {
-            Error::Rpc("Failed to get MerklePaymentMade event after retries".to_string())
+            Error::Rpc("Failed to get MerklePaymentMade events after retries".to_string())
         }))
     }
 
-    /// Try to get the MerklePaymentMade event from a transaction hash (single attempt)
-    async fn try_get_merkle_payment_event(
+    /// Try to get all MerklePaymentMade events of a transaction (single attempt),
+    /// in log order
+    async fn try_get_merkle_payment_events(
         &self,
         tx_hash: TxHash,
-    ) -> Result<IPaymentVault::MerklePaymentMade, Error> {
+        expected: usize,
+    ) -> Result<Vec<IPaymentVault::MerklePaymentMade>, Error> {
         let tx = self
             .contract
             .provider()
@@ -251,13 +318,22 @@ where
             .await
             .map_err(|e| Error::Rpc(format!("Failed to query MerklePaymentMade events: {e}")))?;
 
-        events
+        let mut tx_events: Vec<_> = events
             .into_iter()
-            .find(|(_, log)| log.transaction_hash == Some(tx_hash))
-            .map(|(event, _)| event)
-            .ok_or_else(|| {
-                Error::Rpc("MerklePaymentMade event not found in transaction".to_string())
-            })
+            .filter(|(_, log)| log.transaction_hash == Some(tx_hash))
+            .collect();
+
+        // Log order encodes the contract's input (tree) order
+        tx_events.sort_by_key(|(_, log)| log.log_index.unwrap_or(u64::MAX));
+
+        if tx_events.len() != expected {
+            return Err(Error::Rpc(format!(
+                "Expected {expected} MerklePaymentMade event(s) in transaction, found {}",
+                tx_events.len()
+            )));
+        }
+
+        Ok(tx_events.into_iter().map(|(event, _)| event).collect())
     }
 
     /// Send transaction with retries and handle revert errors

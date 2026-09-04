@@ -43,6 +43,19 @@
   },
   {
     "type": "function",
+    "name": "MAX_TREES_PER_PAYMENT",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "antToken",
     "inputs": [],
     "outputs": [
@@ -170,6 +183,19 @@
   },
   {
     "type": "function",
+    "name": "owner",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "payForMerkleTree",
     "inputs": [
       {
@@ -228,6 +254,71 @@
   },
   {
     "type": "function",
+    "name": "payForMerkleTrees",
+    "inputs": [
+      {
+        "name": "trees",
+        "type": "tuple[]",
+        "internalType": "struct MerkleTreePayment[]",
+        "components": [
+          {
+            "name": "depth",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "merklePaymentTimestamp",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "poolCommitments",
+            "type": "tuple[]",
+            "internalType": "struct PoolCommitment[]",
+            "components": [
+              {
+                "name": "poolHash",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "candidates",
+                "type": "tuple[16]",
+                "internalType": "struct CandidateNode[16]",
+                "components": [
+                  {
+                    "name": "rewardsAddress",
+                    "type": "address",
+                    "internalType": "address"
+                  },
+                  {
+                    "name": "amount",
+                    "type": "uint256",
+                    "internalType": "uint256"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "winnerPoolHashes",
+        "type": "bytes32[]",
+        "internalType": "bytes32[]"
+      },
+      {
+        "name": "totalAmount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "payForQuotes",
     "inputs": [
       {
@@ -251,6 +342,39 @@
             "internalType": "bytes32"
           }
         ]
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "renounceOwnership",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setBatchLimit",
+    "inputs": [
+      {
+        "name": "_newBatchLimit",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "transferOwnership",
+    "inputs": [
+      {
+        "name": "newOwner",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "outputs": [],
@@ -366,6 +490,25 @@
     "anonymous": false
   },
   {
+    "type": "event",
+    "name": "OwnershipTransferred",
+    "inputs": [
+      {
+        "name": "previousOwner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "newOwner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
     "type": "error",
     "name": "AntTokenNull",
     "inputs": []
@@ -398,6 +541,28 @@
   },
   {
     "type": "error",
+    "name": "OwnableInvalidOwner",
+    "inputs": [
+      {
+        "name": "owner",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "OwnableUnauthorizedAccount",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "PaymentAlreadyExists",
     "inputs": [
       {
@@ -415,6 +580,22 @@
         "name": "token",
         "type": "address",
         "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "TooManyTrees",
+    "inputs": [
+      {
+        "name": "provided",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "maxTrees",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ]
   },

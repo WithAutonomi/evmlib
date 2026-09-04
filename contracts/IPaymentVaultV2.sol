@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import {
     PoolCommitment,
+    MerkleTreePayment,
     DataPayment,
     PaymentVerificationResult
 } from "./Types.sol";
@@ -14,6 +15,7 @@ interface IPaymentVaultV2 {
     error DepthTooLarge(uint8 depth, uint8 maxDepth);
     error WrongPoolCount(uint256 expected, uint256 actual);
     error PaymentAlreadyExists(bytes32 winnerPoolHash);
+    error TooManyTrees(uint256 provided, uint256 maxTrees);
 
     event DataPaymentMade(
         address indexed rewardsAddress,
@@ -34,6 +36,10 @@ interface IPaymentVaultV2 {
         PoolCommitment[] calldata poolCommitments,
         uint64 merklePaymentTimestamp
     ) external returns (bytes32 winnerPoolHash, uint256 totalAmount);
+
+    function payForMerkleTrees(
+        MerkleTreePayment[] calldata trees
+    ) external returns (bytes32[] memory winnerPoolHashes, uint256 totalAmount);
 
     function payForQuotes(DataPayment[] calldata _payments) external;
 

@@ -71,7 +71,7 @@ const ARBITRUM_SEPOLIA_TEST_PAYMENT_TOKEN_ADDRESS: Address =
 const ARBITRUM_ONE_PAYMENT_VAULT_ADDRESS: Address =
     address!("9A3EcAc693b699Fc0B2B6A50B5549e50c2320A26");
 
-/// Unified payment vault address on Arbitrum Sepolia (proxy contract).
+/// Unified payment vault address on Arbitrum Sepolia.
 const ARBITRUM_SEPOLIA_TEST_PAYMENT_VAULT_ADDRESS: Address =
     address!("d742E8CFEf27A9a884F3EFfA239Ee2F39c276522");
 
