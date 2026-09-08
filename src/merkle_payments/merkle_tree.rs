@@ -47,12 +47,64 @@ pub enum MerkleTreeError {
 pub type Result<T> = std::result::Result<T, MerkleTreeError>;
 
 /// A Merkle tree built from XorNames (content addresses).
+#[derive(Clone)]
 pub struct MerkleTree {
     inner: ant_merkle::MerkleTree<Sha3Hasher>,
     leaf_count: usize,
     depth: u8,
     root: XorName,
     salts: Vec<[u8; 32]>,
+}
+
+// Persist the salted leaves, including random padding, so recovery recreates
+// exactly the same root and payment intent rather than generating new salts.
+#[derive(Serialize, Deserialize)]
+struct TreeSnapshot {
+    leaves: Vec<[u8; 32]>,
+    salts: Vec<[u8; 32]>,
+}
+
+impl Serialize for MerkleTree {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        TreeSnapshot {
+            leaves: self
+                .inner
+                .leaves()
+                .ok_or_else(|| serde::ser::Error::custom("missing Merkle leaves"))?,
+            salts: self.salts.clone(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for MerkleTree {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let snapshot = TreeSnapshot::deserialize(deserializer)?;
+        let count = snapshot.salts.len();
+        if !(MIN_LEAVES..=MAX_LEAVES).contains(&count)
+            || snapshot.leaves.len() != count.next_power_of_two()
+        {
+            return Err(serde::de::Error::custom(
+                "invalid Merkle snapshot dimensions",
+            ));
+        }
+        let inner = ant_merkle::MerkleTree::<Sha3Hasher>::from_leaves(&snapshot.leaves);
+        let root = inner
+            .root()
+            .ok_or_else(|| serde::de::Error::custom("missing Merkle root"))?;
+        Ok(Self {
+            inner,
+            leaf_count: count,
+            depth: tree_depth(count),
+            root: XorName(root),
+            salts: snapshot.salts,
+        })
+    }
 }
 
 impl MerkleTree {
