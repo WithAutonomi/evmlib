@@ -649,6 +649,34 @@ mod tests {
     /// `WrongPoolCount` reverts at the payment vault for files in the chunk
     /// bands 5-8 (depth 3), 17-32 (depth 5) and 65-128 (depth 7).
     #[test]
+    fn checkpoint_preserves_random_padding_and_address_proofs() {
+        let addresses = (0..3).map(|i| XorName([i; 32])).collect::<Vec<_>>();
+        let original = MerkleTree::from_xornames(addresses.clone()).unwrap();
+        let bytes = serde_json::to_vec(&original).unwrap();
+        let restored: MerkleTree = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(original.root(), restored.root());
+        assert_eq!(
+            original.reward_candidates(42).unwrap(),
+            restored.reward_candidates(42).unwrap()
+        );
+        for (index, address) in addresses.into_iter().enumerate() {
+            let proof = restored.generate_address_proof(index, address).unwrap();
+            assert!(proof.verify());
+            assert_eq!(
+                proof,
+                original.generate_address_proof(index, address).unwrap()
+            );
+        }
+        let invalid = TreeSnapshot {
+            leaves: vec![[0; 32]; 4],
+            salts: vec![[0; 32]; 1],
+        };
+        assert!(
+            serde_json::from_slice::<MerkleTree>(&serde_json::to_vec(&invalid).unwrap()).is_err()
+        );
+    }
+
+    #[test]
     fn reward_candidate_count_matches_contract_for_all_depths() -> TestResult {
         for leaf_count in MIN_LEAVES..=MAX_LEAVES {
             let tree = MerkleTree::from_xornames(make_leaves(leaf_count))?;
