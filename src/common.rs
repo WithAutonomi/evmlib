@@ -15,5 +15,6 @@ pub type U256 = alloy::primitives::U256;
 pub type QuoteHash = Hash;
 pub type Amount = U256;
 pub type QuotePayment = (QuoteHash, Address, Amount);
+#[cfg(feature = "rpc")]
 pub type EthereumWallet = alloy::network::EthereumWallet;
 pub type Calldata = alloy::primitives::Bytes;

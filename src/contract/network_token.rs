@@ -32,7 +32,7 @@ pub enum Error {
     #[error(transparent)]
     PendingTransactionError(#[from] alloy::providers::PendingTransactionError),
     #[error("Timeout: {0:?}")]
-    Timeout(#[from] tokio::time::error::Elapsed),
+    Timeout(#[from] crate::runtime::Elapsed),
     #[error(transparent)]
     Transaction(#[from] retry::TransactionError),
 }

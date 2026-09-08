@@ -213,7 +213,7 @@ where
                             MAX_ATTEMPTS,
                             duration.as_millis()
                         );
-                        tokio::time::sleep(duration).await;
+                        crate::runtime::sleep(duration).await;
                     }
                     attempt += 1;
                 }

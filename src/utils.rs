@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 use crate::common::{Address, Hash};
+#[cfg(feature = "native")]
 use crate::{CustomNetwork, Network};
 use alloy::network::Ethereum;
 use alloy::providers::fillers::{
@@ -17,17 +18,23 @@ use alloy::providers::fillers::{
 };
 use alloy::providers::{Identity, ProviderBuilder, RootProvider};
 use alloy::transports::http::reqwest;
+#[cfg(feature = "native")]
 use std::env;
 
+#[cfg(feature = "native")]
 const MAINNET_ID: u8 = 1;
+#[cfg(feature = "native")]
 const ALPHANET_ID: u8 = 2;
 
 /// environment variable to connect to a custom EVM network
 pub const RPC_URL: &str = "RPC_URL";
+#[cfg(feature = "native")]
 const RPC_URL_BUILD_TIME_VAL: Option<&str> = option_env!("RPC_URL");
 pub const PAYMENT_TOKEN_ADDRESS: &str = "PAYMENT_TOKEN_ADDRESS";
+#[cfg(feature = "native")]
 const PAYMENT_TOKEN_ADDRESS_BUILD_TIME_VAL: Option<&str> = option_env!("PAYMENT_TOKEN_ADDRESS");
 pub const PAYMENT_VAULT_ADDRESS: &str = "PAYMENT_VAULT_ADDRESS";
+#[cfg(feature = "native")]
 const PAYMENT_VAULT_ADDRESS_BUILD_TIME_VAL: Option<&str> = option_env!("PAYMENT_VAULT_ADDRESS");
 
 #[derive(thiserror::Error, Debug)]
@@ -48,8 +55,10 @@ pub fn dummy_hash() -> Hash {
     Hash::new(rand::rngs::OsRng.r#gen())
 }
 
+#[cfg(feature = "native")]
 use std::sync::OnceLock;
 
+#[cfg(feature = "native")]
 static EVM_NETWORK: OnceLock<Network> = OnceLock::new();
 
 /// Initialize the EVM Network.
@@ -64,6 +73,7 @@ static EVM_NETWORK: OnceLock<Network> = OnceLock::new();
 /// If all of these fail an error will be returned. It doesn't really make sense to have a default
 /// for the EVM network. Doing so actually results in confusion for users where sometimes payments
 /// can be rejected because they are on the wrong network.
+#[cfg(feature = "native")]
 pub fn get_evm_network(local: bool, network_id: Option<u8>) -> Result<Network, Error> {
     if let Some(network) = EVM_NETWORK.get() {
         return Ok(network.clone());
@@ -112,6 +122,7 @@ pub fn get_evm_network(local: bool, network_id: Option<u8>) -> Result<Network, E
 /// Get the `Network` from environment variables.
 ///
 /// Returns an error if we cannot obtain the network from any means.
+#[cfg(feature = "native")]
 fn get_evm_network_from_env() -> Result<Network, Error> {
     let evm_vars = [
         env::var(RPC_URL)
@@ -170,6 +181,7 @@ fn get_evm_network_from_env() -> Result<Network, Error> {
 }
 
 /// Get the `Network::Custom` from the hardcoded values.
+#[cfg(feature = "native")]
 fn local_evm_network_hardcoded() -> Network {
     // Payment vault address is deterministic when deployed by Anvil's second default account (Bob)
     let network = CustomNetwork::new(

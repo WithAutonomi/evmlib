@@ -66,7 +66,7 @@ pub(crate) async fn retry<F, Fut, T, E>(
 ) -> Result<T, E>
 where
     F: FnMut() -> Fut + Send,
-    Fut: std::future::Future<Output = Result<T, E>> + Send,
+    Fut: std::future::Future<Output = Result<T, E>>,
     E: std::fmt::Debug,
 {
     let mut retries = 0;
@@ -89,7 +89,7 @@ where
                     delay.as_secs()
                 );
 
-                tokio::time::sleep(delay).await;
+                crate::runtime::sleep(delay).await;
             }
         }
     }
@@ -173,7 +173,7 @@ where
                     delay.as_secs(),
                 );
 
-                tokio::time::sleep(delay).await;
+                crate::runtime::sleep(delay).await;
 
                 continue;
             }
@@ -237,7 +237,7 @@ where
         nonce = transaction_request.nonce();
     }
 
-    let pending_tx_builder_result = tokio::time::timeout(
+    let pending_tx_builder_result = crate::runtime::timeout(
         Duration::from_millis(BROADCAST_TRANSACTION_TIMEOUT_MS),
         provider.send_transaction(transaction_request.clone()),
     )

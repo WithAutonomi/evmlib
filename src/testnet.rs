@@ -12,7 +12,6 @@ use std::num::ParseIntError;
 use crate::common::Address;
 use crate::contract::payment_vault::handler::PaymentVaultHandler;
 use crate::contract::{network_token::NetworkToken, payment_vault};
-use crate::reqwest::Url;
 use crate::{CustomNetwork, Network};
 use alloy::hex::ToHexExt;
 use alloy::network::{Ethereum, EthereumWallet};
@@ -23,6 +22,7 @@ use alloy::providers::fillers::{
 };
 use alloy::providers::{Identity, ProviderBuilder, RootProvider};
 use alloy::signers::local::PrivateKeySigner;
+use url::Url;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TestnetError {

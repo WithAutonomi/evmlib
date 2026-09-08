@@ -8,8 +8,8 @@
 
 use ant_merkle::Hasher;
 use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+use web_time::{SystemTime, UNIX_EPOCH};
 use xor_name::XorName;
 
 use super::merkle_payment::sha3_256;

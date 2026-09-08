@@ -8,7 +8,9 @@
 
 use crate::common::Hash;
 use alloy::primitives::keccak256;
+#[cfg(feature = "rpc")]
 use alloy::signers::k256::ecdsa::{RecoveryId, Signature, SigningKey, signature};
+#[cfg(feature = "rpc")]
 use alloy::signers::local::PrivateKeySigner;
 
 /// Hash data using Keccak256.
@@ -17,6 +19,7 @@ pub fn hash<T: AsRef<[u8]>>(data: T) -> Hash {
 }
 
 /// Sign error
+#[cfg(feature = "rpc")]
 #[derive(Debug, thiserror::Error)]
 pub enum SignError {
     #[error("Failed to parse EVM secret key: {0}")]
@@ -26,6 +29,7 @@ pub enum SignError {
 }
 
 /// Sign a message with an EVM secret key.
+#[cfg(feature = "rpc")]
 pub fn sign_message(evm_secret_key_str: &str, message: &[u8]) -> Result<Vec<u8>, SignError> {
     let signer: PrivateKeySigner =
         evm_secret_key_str
@@ -43,6 +47,7 @@ pub fn sign_message(evm_secret_key_str: &str, message: &[u8]) -> Result<Vec<u8>,
 }
 
 /// Hash a message using Keccak256, then add the Ethereum prefix and hash it again.
+#[cfg(feature = "rpc")]
 fn to_eth_signed_message_hash<T: AsRef<[u8]>>(message: T) -> [u8; 32] {
     const PREFIX: &str = "\x19Ethereum Signed Message:\n32";
 
@@ -56,6 +61,7 @@ fn to_eth_signed_message_hash<T: AsRef<[u8]>>(message: T) -> [u8; 32] {
 }
 
 /// Sign a message with a recoverable public key.
+#[cfg(feature = "rpc")]
 fn sign_message_recoverable<T: AsRef<[u8]>>(
     secret_key: &SigningKey,
     message: T,
