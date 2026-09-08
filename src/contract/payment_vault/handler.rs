@@ -127,16 +127,10 @@ where
         I: IntoIterator<Item = T>,
         T: Into<IPaymentVault::PoolCommitment>,
     {
-        let pool_commitments: Vec<IPaymentVault::PoolCommitment> = pool_commitments
-            .into_iter()
-            .map(|item| item.into())
-            .collect();
-
-        let calldata = self
-            .contract
-            .payForMerkleTree(depth, pool_commitments, merkle_payment_timestamp)
-            .calldata()
-            .to_owned();
+        let pool_commitments: Vec<IPaymentVault::PoolCommitment> =
+            pool_commitments.into_iter().map(Into::into).collect();
+        let calldata =
+            super::encode_merkle_payment(depth, pool_commitments, merkle_payment_timestamp).into();
 
         Ok((calldata, *self.contract.address()))
     }

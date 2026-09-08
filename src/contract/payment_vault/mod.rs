@@ -29,3 +29,30 @@ pub async fn get_completed_merkle_payment(
 
     handler.get_completed_merkle_payment(winner_pool_hash).await
 }
+
+/// Encode the native vault call for an external signer without constructing an RPC provider.
+pub fn encode_merkle_payment<T: Into<interface::IPaymentVault::PoolCommitment>>(
+    depth: u8,
+    pools: Vec<T>,
+    timestamp: u64,
+) -> Vec<u8> {
+    use alloy::sol_types::SolCall;
+    interface::IPaymentVault::payForMerkleTreeCall {
+        depth,
+        poolCommitments: pools.into_iter().map(Into::into).collect(),
+        merklePaymentTimestamp: timestamp,
+    }
+    .abi_encode()
+}
+
+/// Decode a vault Merkle settlement event using the same ABI as the native wallet.
+pub fn decode_merkle_payment_event(
+    topics: &[[u8; 32]],
+    data: &[u8],
+) -> Result<interface::IPaymentVault::MerklePaymentMade, alloy::sol_types::Error> {
+    use alloy::sol_types::SolEvent;
+    interface::IPaymentVault::MerklePaymentMade::decode_raw_log(
+        topics.iter().copied().map(alloy::primitives::B256::from),
+        data,
+    )
+}
