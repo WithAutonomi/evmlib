@@ -177,7 +177,7 @@ where
     ///
     /// Retries up to 2 times with exponential backoff if the event is not found
     /// immediately (handles cases where the transaction may not be fully indexed).
-    async fn get_merkle_payment_event(
+    pub(crate) async fn get_merkle_payment_event(
         &self,
         tx_hash: TxHash,
     ) -> Result<IPaymentVault::MerklePaymentMade, Error> {

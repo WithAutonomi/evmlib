@@ -108,3 +108,104 @@ async fn test_pay_for_quotes() {
             .div_ceil(MAX_TRANSFERS_PER_TRANSACTION)
     );
 }
+
+#[tokio::test]
+async fn journaled_payment_survives_restart_without_double_payment() {
+    use evmlib::wallet::journal::{PaymentRequest, PaymentStatus, SignedPayment};
+    let (_anvil, network, genesis_wallet) = local_testnet().await;
+    let wallet = funded_wallet(&network, genesis_wallet).await;
+    let quote = random_quote_payment();
+    let amount = quote.2;
+    let request = PaymentRequest::Quotes(vec![quote]);
+    let before = wallet.balance_of_tokens().await.unwrap();
+    let signed = wallet.prepare_payment(&request).await.unwrap();
+    assert_eq!(wallet.balance_of_tokens().await.unwrap(), before);
+    assert!(matches!(
+        wallet.observe_payment(&signed, &request).await.unwrap(),
+        PaymentStatus::Pending
+    ));
+    let restored: SignedPayment =
+        serde_json::from_slice(&serde_json::to_vec(&signed).unwrap()).unwrap();
+    let wrong_request = PaymentRequest::Quotes(vec![random_quote_payment()]);
+    assert!(
+        wallet
+            .broadcast_payment(&restored, &wrong_request)
+            .await
+            .is_err()
+    );
+    let hash = wallet.broadcast_payment(&restored, &request).await.unwrap();
+    let receipt = loop {
+        if let PaymentStatus::Confirmed(receipt) =
+            wallet.observe_payment(&restored, &request).await.unwrap()
+        {
+            break receipt;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert_eq!(receipt.transaction_hash, hash);
+    assert_eq!(receipt.amount, amount);
+    assert_eq!(wallet.balance_of_tokens().await.unwrap(), before - amount);
+    // RPC may reject a mined duplicate; either outcome must not spend twice.
+    let _ = wallet.broadcast_payment(&restored, &request).await;
+    assert_eq!(wallet.balance_of_tokens().await.unwrap(), before - amount);
+    assert!(matches!(
+        wallet.observe_payment(&restored, &request).await.unwrap(),
+        PaymentStatus::Confirmed(_)
+    ));
+}
+
+#[tokio::test]
+async fn journaled_merkle_payment_restores_the_confirmed_winner() {
+    use evmlib::merkle_batch_payment::{CandidateNode, PoolCommitment};
+    use evmlib::wallet::journal::{PaymentRequest, PaymentStatus};
+    let (_anvil, network, genesis_wallet) = local_testnet().await;
+    let wallet = funded_wallet(&network, genesis_wallet).await;
+    let pools = (1..=2)
+        .map(|n| PoolCommitment {
+            pool_hash: [n; 32],
+            candidates: std::array::from_fn(|i| CandidateNode {
+                rewards_address: [(i + 1) as u8; 20].into(),
+                price: Amount::from(100),
+            }),
+        })
+        .collect::<Vec<_>>();
+    let request = PaymentRequest::Merkle {
+        depth: 2,
+        pools: pools.clone(),
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    };
+    let before = wallet.balance_of_tokens().await.unwrap();
+    let signed = wallet.prepare_payment(&request).await.unwrap();
+    wallet.broadcast_payment(&signed, &request).await.unwrap();
+    let receipt = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let PaymentStatus::Confirmed(receipt) =
+                wallet.observe_payment(&signed, &request).await.unwrap()
+            {
+                break receipt;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        pools
+            .iter()
+            .any(|p| Some(p.pool_hash) == receipt.winner_pool)
+    );
+    assert_eq!(
+        wallet.balance_of_tokens().await.unwrap(),
+        before - receipt.amount
+    );
+    let PaymentStatus::Confirmed(recovered) =
+        wallet.observe_payment(&signed, &request).await.unwrap()
+    else {
+        panic!("confirmed receipt missing")
+    };
+    assert_eq!(recovered.winner_pool, receipt.winner_pool);
+    assert_eq!(recovered.transaction_hash, receipt.transaction_hash);
+}

@@ -12,7 +12,7 @@ version = "0.9.1"
 default = ["native"]
 # Local wallets, RPC execution, environment discovery, and Anvil processes.
 # Payment types, hashing, pricing, and Merkle verification are always portable.
-native = ["rpc", "alloy/node-bindings"]
+native = ["rpc", "alloy/node-bindings", "alloy/k256"]
 # HTTP RPC and wallet operations use browser fetch when targeting WASM.
 rpc = ["alloy/contract", "alloy/json-rpc", "alloy/network", "alloy/provider-http", "alloy/reqwest-rustls-tls", "alloy/rpc-client", "alloy/rpc-types", "alloy/signer-local", "dep:tokio", "dep:exponential-backoff"]
 external-signer = ["rpc"]

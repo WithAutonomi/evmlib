@@ -6,6 +6,9 @@
 // option. This file may not be copied, modified, or distributed except
 // according to those terms.
 
+#[cfg(feature = "native")]
+pub mod journal;
+
 use crate::common::{Address, Amount, QuoteHash, QuotePayment, TxHash, U256};
 use crate::contract::network_token::NetworkToken;
 use crate::contract::payment_vault::MAX_TRANSFERS_PER_TRANSACTION;

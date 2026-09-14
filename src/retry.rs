@@ -376,12 +376,12 @@ fn extract_revert_data(
 
 /// EIP-1559 fee parameters for a transaction.
 #[derive(Debug, Clone, Copy)]
-struct Eip1559Fees {
-    max_fee_per_gas: u128,
-    max_priority_fee_per_gas: u128,
+pub(crate) struct Eip1559Fees {
+    pub(crate) max_fee_per_gas: u128,
+    pub(crate) max_priority_fee_per_gas: u128,
 }
 
-async fn get_eip1559_fees<P: Provider<N>, N: Network>(
+pub(crate) async fn get_eip1559_fees<P: Provider<N>, N: Network>(
     provider: &P,
     transaction_config: &TransactionConfig,
 ) -> Result<Option<Eip1559Fees>, TransactionError> {
