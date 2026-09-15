@@ -504,8 +504,11 @@ pub async fn pay_for_quotes<T: IntoIterator<Item = QuotePayment>>(
 #[cfg(test)]
 mod tests {
     use crate::common::Amount;
+    #[cfg(feature = "native")]
     use crate::testnet::Testnet;
-    use crate::wallet::{Wallet, from_private_key};
+    #[cfg(feature = "native")]
+    use crate::wallet::Wallet;
+    use crate::wallet::from_private_key;
     use alloy::network::{Ethereum, EthereumWallet, NetworkWallet};
     use alloy::primitives::address;
 
@@ -573,8 +576,8 @@ mod tests {
         assert_eq!(cost, Amount::from(100u64));
     }
 
-    #[tokio::test]
-    async fn test_from_private_key() {
+    #[test]
+    fn test_from_private_key() {
         let private_key = "bf210844fa5463e373974f3d6fbedf451350c3e72b81b3c5b1718cb91f49c33d"; // DevSkim: ignore DS117838
         let wallet = from_private_key(private_key).unwrap();
         let account = <EthereumWallet as NetworkWallet<Ethereum>>::default_signer_address(&wallet);
@@ -586,6 +589,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "native")]
     #[tokio::test]
     async fn test_transfer_gas_tokens() {
         let testnet = Testnet::new().await.unwrap();

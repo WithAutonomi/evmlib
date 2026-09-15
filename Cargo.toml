@@ -44,3 +44,19 @@ futures-util = "0.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs-next = "~2.0"
 serde_json = "1.0.108"
+
+[[test]]
+name = "wallet"
+required-features = ["native"]
+
+[[test]]
+name = "network_token"
+required-features = ["native"]
+
+[[test]]
+name = "payment_vault"
+required-features = ["native"]
+
+[[test]]
+name = "gas_fee_limit"
+required-features = ["rpc"]
