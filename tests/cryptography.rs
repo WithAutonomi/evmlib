@@ -1,6 +1,6 @@
-mod common;
-
-use evmlib::cryptography::{hash, sign_message};
+use evmlib::cryptography::hash;
+#[cfg(feature = "rpc")]
+use evmlib::cryptography::sign_message;
 
 /// Test for the hash function with known inputs and outputs
 #[test]
@@ -30,6 +30,7 @@ fn test_hash_function() {
 }
 
 /// Test for sign_message with invalid inputs
+#[cfg(feature = "rpc")]
 #[test]
 fn test_sign_message_invalid_inputs() {
     // Test with invalid key
@@ -45,6 +46,7 @@ fn test_sign_message_invalid_inputs() {
 }
 
 /// Test for sign_message functionality with a valid key
+#[cfg(feature = "rpc")]
 #[test]
 fn test_sign_message_valid() {
     // Use a hardcoded private key for testing
@@ -63,6 +65,7 @@ fn test_sign_message_valid() {
 }
 
 /// Test for reproducible signatures with the same key and message
+#[cfg(feature = "rpc")]
 #[test]
 fn test_sign_message_reproducibility() {
     // Use a hardcoded private key for testing

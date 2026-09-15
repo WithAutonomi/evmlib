@@ -108,3 +108,292 @@ async fn test_pay_for_quotes() {
             .div_ceil(MAX_TRANSFERS_PER_TRANSACTION)
     );
 }
+
+#[tokio::test]
+async fn journaled_payment_survives_restart_without_double_payment() {
+    use evmlib::wallet::journal::{PaymentRequest, PaymentStatus, SignedPayment};
+    let (_anvil, network, genesis_wallet) = local_testnet().await;
+    let wallet = funded_wallet(&network, genesis_wallet).await;
+    let quote = random_quote_payment();
+    let amount = quote.2;
+    let request = PaymentRequest::Quotes(vec![quote]);
+    let before = wallet.balance_of_tokens().await.unwrap();
+    let signed = wallet.prepare_payment(&request).await.unwrap();
+    assert_eq!(wallet.balance_of_tokens().await.unwrap(), before);
+    assert!(matches!(
+        wallet.observe_payment(&signed, &request).await.unwrap(),
+        PaymentStatus::Pending
+    ));
+    let restored: SignedPayment =
+        serde_json::from_slice(&serde_json::to_vec(&signed).unwrap()).unwrap();
+    let wrong_request = PaymentRequest::Quotes(vec![random_quote_payment()]);
+    assert!(
+        wallet
+            .broadcast_payment(&restored, &wrong_request)
+            .await
+            .is_err()
+    );
+    let hash = wallet.broadcast_payment(&restored, &request).await.unwrap();
+    let receipt = loop {
+        if let PaymentStatus::Confirmed(receipt) =
+            wallet.observe_payment(&restored, &request).await.unwrap()
+        {
+            break receipt;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert_eq!(receipt.transaction_hash, hash);
+    assert_eq!(receipt.amount, amount);
+    assert_eq!(wallet.balance_of_tokens().await.unwrap(), before - amount);
+    // RPC may reject a mined duplicate; either outcome must not spend twice.
+    let _ = wallet.broadcast_payment(&restored, &request).await;
+    assert_eq!(wallet.balance_of_tokens().await.unwrap(), before - amount);
+    assert!(matches!(
+        wallet.observe_payment(&restored, &request).await.unwrap(),
+        PaymentStatus::Confirmed(_)
+    ));
+}
+
+#[tokio::test]
+async fn journaled_merkle_payment_restores_the_confirmed_winner() {
+    use evmlib::merkle_batch_payment::{CandidateNode, PoolCommitment};
+    use evmlib::wallet::journal::{PaymentRequest, PaymentStatus};
+    let (_anvil, network, genesis_wallet) = local_testnet().await;
+    let wallet = funded_wallet(&network, genesis_wallet).await;
+    let pools = (1..=2)
+        .map(|n| PoolCommitment {
+            pool_hash: [n; 32],
+            candidates: std::array::from_fn(|i| CandidateNode {
+                rewards_address: [(i + 1) as u8; 20].into(),
+                price: Amount::from(100),
+            }),
+        })
+        .collect::<Vec<_>>();
+    let request = PaymentRequest::Merkle {
+        depth: 2,
+        pools: pools.clone(),
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    };
+    let before = wallet.balance_of_tokens().await.unwrap();
+    let signed = wallet.prepare_payment(&request).await.unwrap();
+    wallet.broadcast_payment(&signed, &request).await.unwrap();
+    let receipt = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let PaymentStatus::Confirmed(receipt) =
+                wallet.observe_payment(&signed, &request).await.unwrap()
+            {
+                break receipt;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        pools
+            .iter()
+            .any(|p| Some(p.pool_hash) == receipt.winner_pool)
+    );
+    assert_eq!(
+        wallet.balance_of_tokens().await.unwrap(),
+        before - receipt.amount
+    );
+    let PaymentStatus::Confirmed(recovered) =
+        wallet.observe_payment(&signed, &request).await.unwrap()
+    else {
+        panic!("confirmed receipt missing")
+    };
+    assert_eq!(recovered.winner_pool, receipt.winner_pool);
+    assert_eq!(recovered.transaction_hash, receipt.transaction_hash);
+}
+
+/// Mine enough blocks for Anvil's default two-epoch finality lag.
+async fn finalize_test_chain(wallet: &Wallet) {
+    wallet
+        .to_provider()
+        .anvil_mine(Some(96), None)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn journaled_revert_remains_unresolved_across_a_reorg() {
+    use evmlib::contract::network_token::NetworkToken;
+    use evmlib::wallet::journal::{PaymentRequest, PaymentStatus};
+    let (_anvil, network, genesis_wallet) = local_testnet().await;
+    let wallet = funded_wallet(&network, genesis_wallet.clone()).await;
+    let genesis = wallet_address(&genesis_wallet);
+    wallet
+        .approve_to_spend_tokens(genesis, Amount::MAX)
+        .await
+        .unwrap();
+    let gp = ProviderBuilder::new()
+        .wallet(genesis_wallet)
+        .connect_http(network.rpc_url().clone());
+    let token = NetworkToken::new(*network.payment_token_address(), gp);
+    let request = PaymentRequest::Quotes(vec![random_quote_payment()]);
+    let signed = wallet.prepare_payment(&request).await.unwrap();
+    let provider = wallet.to_provider();
+    let snapshot = provider.anvil_snapshot().await.unwrap();
+    let before = wallet.balance_of_tokens().await.unwrap();
+
+    // Another account drains the allowance on a fork, making the signed payment revert.
+    token
+        .contract
+        .transferFrom(wallet.address(), genesis, before)
+        .send()
+        .await
+        .unwrap()
+        .get_receipt()
+        .await
+        .unwrap();
+    wallet.broadcast_payment(&signed, &request).await.unwrap();
+    assert!(matches!(
+        wallet.observe_payment(&signed, &request).await.unwrap(),
+        PaymentStatus::Finalizing
+    ));
+
+    // Recovery must retain the original bytes: they can still pay after a reorg.
+    assert!(provider.anvil_revert(snapshot).await.unwrap());
+    wallet.broadcast_payment(&signed, &request).await.unwrap();
+    assert!(matches!(
+        wallet.observe_payment(&signed, &request).await.unwrap(),
+        PaymentStatus::Confirmed(_)
+    ));
+    assert_eq!(
+        wallet.balance_of_tokens().await.unwrap(),
+        before - Amount::from(1)
+    );
+}
+
+#[tokio::test]
+async fn journaled_revert_becomes_retryable_only_after_finality() {
+    use evmlib::contract::network_token::NetworkToken;
+    use evmlib::wallet::journal::{PaymentRequest, PaymentStatus};
+    let (_anvil, network, genesis_wallet) = local_testnet().await;
+    let wallet = funded_wallet(&network, genesis_wallet.clone()).await;
+    let genesis = wallet_address(&genesis_wallet);
+    wallet
+        .approve_to_spend_tokens(genesis, Amount::MAX)
+        .await
+        .unwrap();
+    let gp = ProviderBuilder::new()
+        .wallet(genesis_wallet)
+        .connect_http(network.rpc_url().clone());
+    let token = NetworkToken::new(*network.payment_token_address(), gp);
+    let request = PaymentRequest::Quotes(vec![random_quote_payment()]);
+    let signed = wallet.prepare_payment(&request).await.unwrap();
+    let before = wallet.balance_of_tokens().await.unwrap();
+    token
+        .contract
+        .transferFrom(wallet.address(), genesis, before)
+        .send()
+        .await
+        .unwrap()
+        .get_receipt()
+        .await
+        .unwrap();
+    wallet.broadcast_payment(&signed, &request).await.unwrap();
+    assert!(matches!(
+        wallet.observe_payment(&signed, &request).await.unwrap(),
+        PaymentStatus::Finalizing
+    ));
+    finalize_test_chain(&wallet).await;
+    assert!(matches!(
+        wallet.observe_payment(&signed, &request).await.unwrap(),
+        PaymentStatus::Reverted
+    ));
+}
+
+#[tokio::test]
+async fn journaled_payment_detects_a_finalized_nonce_replacement() {
+    use evmlib::wallet::journal::{PaymentRequest, PaymentStatus};
+    let (_anvil, network, genesis_wallet) = local_testnet().await;
+    let wallet = funded_wallet(&network, genesis_wallet).await;
+    let request = PaymentRequest::Quotes(vec![random_quote_payment()]);
+    let signed = {
+        let _guard = wallet.lock().await;
+        wallet.prepare_payment(&request).await.unwrap()
+    };
+    let replacement = {
+        let _guard = wallet.lock().await;
+        wallet
+            .transfer_gas_tokens([9; 20].into(), Amount::from(1))
+            .await
+            .unwrap()
+    };
+    assert!(matches!(
+        wallet.observe_payment(&signed, &request).await.unwrap(),
+        PaymentStatus::Finalizing
+    ));
+    finalize_test_chain(&wallet).await;
+    let PaymentStatus::Replaced { transaction_hash } =
+        wallet.observe_payment(&signed, &request).await.unwrap()
+    else {
+        panic!("the finalized nonce replacement must resolve the journal");
+    };
+    assert_eq!(transaction_hash, replacement);
+    let retry = wallet.prepare_payment(&request).await.unwrap();
+    wallet.broadcast_payment(&retry, &request).await.unwrap();
+    assert!(matches!(
+        wallet.observe_payment(&retry, &request).await.unwrap(),
+        PaymentStatus::Confirmed(_)
+    ));
+}
+
+#[tokio::test]
+async fn journaled_payment_recovers_a_successful_fee_replacement() {
+    use evmlib::transaction_config::MaxFeePerGas;
+    use evmlib::wallet::journal::{PaymentRequest, PaymentStatus};
+    let (_anvil, network, genesis_wallet) = local_testnet().await;
+    let mut wallet = funded_wallet(&network, genesis_wallet).await;
+    let request = PaymentRequest::Quotes(vec![random_quote_payment()]);
+    let before = wallet.balance_of_tokens().await.unwrap();
+    let original = wallet.prepare_payment(&request).await.unwrap();
+    wallet.set_transaction_config(TransactionConfig {
+        max_fee_per_gas: MaxFeePerGas::Custom(100_000_000_000),
+    });
+    let replacement = wallet.prepare_payment(&request).await.unwrap();
+    let hash = wallet
+        .broadcast_payment(&replacement, &request)
+        .await
+        .unwrap();
+    finalize_test_chain(&wallet).await;
+    let PaymentStatus::Confirmed(receipt) =
+        wallet.observe_payment(&original, &request).await.unwrap()
+    else {
+        panic!("a successful same-intent replacement must recover its receipt");
+    };
+    assert_eq!(receipt.transaction_hash, hash);
+    assert_eq!(
+        wallet.balance_of_tokens().await.unwrap(),
+        before - Amount::from(1)
+    );
+}
+
+#[tokio::test]
+async fn journaled_payment_keeps_unexplained_nonce_consumption_unresolved() {
+    use alloy::providers::Provider;
+    use evmlib::wallet::journal::PaymentRequest;
+    let (_anvil, network, genesis_wallet) = local_testnet().await;
+    let wallet = funded_wallet(&network, genesis_wallet).await;
+    let request = PaymentRequest::Quotes(vec![random_quote_payment()]);
+    let signed = wallet.prepare_payment(&request).await.unwrap();
+    let provider = wallet.to_provider();
+    let nonce = provider
+        .get_transaction_count(wallet.address())
+        .await
+        .unwrap();
+    // Model a nonce advance without a normal sender transaction, e.g. an
+    // EIP-7702 authorization, or missing historical transaction data.
+    provider
+        .anvil_set_nonce(wallet.address(), nonce + 1)
+        .await
+        .unwrap();
+    finalize_test_chain(&wallet).await;
+    let error = wallet.observe_payment(&signed, &request).await.unwrap_err();
+    assert!(error.contains("retain the journal"), "{error}");
+}
