@@ -128,9 +128,15 @@ impl fmt::Debug for PaymentQuote {
 impl PaymentQuote {
     /// Compute the hash of this quote.
     pub fn hash(&self) -> QuoteHash {
-        let mut bytes = self.bytes_for_sig();
-        bytes.extend_from_slice(self.pub_key.as_slice());
-        bytes.extend_from_slice(self.signature.as_slice());
+        Self::hash_signed_bytes(&self.bytes_for_sig(), &self.pub_key, &self.signature)
+    }
+
+    /// Compute a quote identifier from its canonical signed payload and signature.
+    /// Wire adapters use this same hash construction as [`Self::hash`].
+    pub fn hash_signed_bytes(payload: &[u8], public_key: &[u8], signature: &[u8]) -> QuoteHash {
+        let mut bytes = payload.to_vec();
+        bytes.extend_from_slice(public_key);
+        bytes.extend_from_slice(signature);
         crypto_hash(bytes)
     }
 

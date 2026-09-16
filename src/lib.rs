@@ -13,18 +13,21 @@
 
 use crate::common::{Address, Amount};
 use crate::merkle_batch_payment::PoolCommitment;
+#[cfg(feature = "native")]
 use crate::utils::get_evm_network;
 use alloy::primitives::address;
-use alloy::transports::http::reqwest;
 use serde::{Deserialize, Serialize};
 use serde_with::{DisplayFromStr, serde_as};
 use std::str::FromStr;
 use std::sync::LazyLock;
+use url::Url;
 
+#[cfg(feature = "rpc")]
 #[macro_use]
 extern crate tracing;
 
 pub mod common;
+#[cfg(feature = "rpc")]
 pub mod contract;
 pub mod cryptography;
 pub mod data_payments;
@@ -33,13 +36,21 @@ pub mod external_signer;
 pub mod merkle_batch_payment;
 pub mod merkle_payments;
 pub mod quoting_metrics;
+#[cfg(feature = "rpc")]
 mod retry;
+#[cfg(feature = "rpc")]
+mod runtime;
+#[cfg(feature = "native")]
 pub mod testnet;
+#[cfg(feature = "rpc")]
 pub mod transaction_config;
+#[cfg(feature = "rpc")]
 pub mod utils;
+#[cfg(feature = "rpc")]
 pub mod wallet;
 
 // Re-export GasInfo for use by other crates
+#[cfg(feature = "rpc")]
 pub use retry::GasInfo;
 
 // Re-export payment types for convenience (replaces ant-evm)
@@ -47,15 +58,16 @@ pub use common::Address as RewardsAddress;
 pub use data_payments::{EncodedPeerId, PaymentQuote, ProofOfPayment};
 
 /// Timeout for transactions
+#[cfg(feature = "rpc")]
 const TX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(24); // Should differ per chain
 
-static PUBLIC_ARBITRUM_ONE_HTTP_RPC_URL: LazyLock<reqwest::Url> = LazyLock::new(|| {
+static PUBLIC_ARBITRUM_ONE_HTTP_RPC_URL: LazyLock<Url> = LazyLock::new(|| {
     "https://arb1.arbitrum.io/rpc"
         .parse()
         .expect("Invalid RPC URL")
 });
 
-static PUBLIC_ARBITRUM_SEPOLIA_HTTP_RPC_URL: LazyLock<reqwest::Url> = LazyLock::new(|| {
+static PUBLIC_ARBITRUM_SEPOLIA_HTTP_RPC_URL: LazyLock<Url> = LazyLock::new(|| {
     "https://sepolia-rollup.arbitrum.io/rpc"
         .parse()
         .expect("Invalid RPC URL")
@@ -79,7 +91,7 @@ const ARBITRUM_SEPOLIA_TEST_PAYMENT_VAULT_ADDRESS: Address =
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CustomNetwork {
     #[serde_as(as = "DisplayFromStr")]
-    pub rpc_url_http: reqwest::Url,
+    pub rpc_url_http: Url,
     pub payment_token_address: Address,
     /// Unified payment vault handling both single-node and merkle payments.
     pub payment_vault_address: Address,
@@ -88,7 +100,7 @@ pub struct CustomNetwork {
 impl CustomNetwork {
     pub fn new(rpc_url: &str, payment_token_addr: &str, payment_vault_addr: &str) -> Self {
         Self {
-            rpc_url_http: reqwest::Url::parse(rpc_url).expect("Invalid RPC URL"),
+            rpc_url_http: Url::parse(rpc_url).expect("Invalid RPC URL"),
             payment_token_address: Address::from_str(payment_token_addr)
                 .expect("Invalid payment token address"),
             payment_vault_address: Address::from_str(payment_vault_addr)
@@ -128,6 +140,7 @@ impl std::str::FromStr for Network {
 }
 
 impl Network {
+    #[cfg(feature = "native")]
     pub fn new(local: bool) -> Result<Self, utils::Error> {
         get_evm_network(local, None).inspect_err(|err| {
             warn!("Failed to select EVM network from ENV: {err}");
@@ -150,7 +163,7 @@ impl Network {
         }
     }
 
-    pub fn rpc_url(&self) -> &reqwest::Url {
+    pub fn rpc_url(&self) -> &Url {
         match self {
             Network::ArbitrumOne => &PUBLIC_ARBITRUM_ONE_HTTP_RPC_URL,
             Network::ArbitrumSepoliaTest => &PUBLIC_ARBITRUM_SEPOLIA_HTTP_RPC_URL,
