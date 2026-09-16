@@ -13,7 +13,75 @@ use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::network::TransactionBuilder;
 use alloy::providers::Provider;
 use alloy::rpc::types::{Block, Header, TransactionReceipt};
+use alloy::transports::{RpcError, TransportErrorKind};
 use serde::{Deserialize, Serialize};
+
+/// Retry base for reads made while a caller is polling for an outcome. The
+/// native client observes inside a 30s window, so the default 4s base (4/16/36s)
+/// would turn one throttled read into a timed-out payment.
+const OBSERVE_RETRY_INTERVAL_MS: u64 = 500;
+
+/// Run a read-only RPC call with the crate's standard backoff.
+///
+/// Every read in the journal path used to be single-shot, so one `429` from a
+/// public endpoint failed the upload — the legacy `send_transaction_with_retries`
+/// path wrapped the same reads in three retries.
+async fn rpc<T, E, F, Fut>(
+    operation: &str,
+    interval_ms: Option<u64>,
+    action: F,
+) -> Result<T, String>
+where
+    F: FnMut() -> Fut + Send,
+    Fut: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Debug + std::fmt::Display,
+{
+    crate::retry::retry(action, operation, interval_ms)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// A failure the endpoint may not give again: HTTP-level errors (429, 5xx),
+/// connection loss, timeouts, and the backend-timeout error responses public
+/// load balancers emit. Definitive RPC rejections (bad nonce, underpriced,
+/// insufficient funds) are never transient.
+fn is_transient(err: &RpcError<TransportErrorKind>) -> bool {
+    match err {
+        RpcError::Transport(_) => true,
+        RpcError::ErrorResp(payload) => {
+            let message = payload.message.to_ascii_lowercase();
+            [
+                "deadline exceeded",
+                "timeout",
+                "timed out",
+                "too many requests",
+                "rate limit",
+            ]
+            .iter()
+            .any(|needle| message.contains(needle))
+        }
+        _ => false,
+    }
+}
+
+/// The endpoint already holds these exact bytes: a retried broadcast after an
+/// ambiguous failure, or a replica that saw the first send.
+fn is_already_known(err: &RpcError<TransportErrorKind>) -> bool {
+    match err {
+        RpcError::ErrorResp(payload) => {
+            let message = payload.message.to_ascii_lowercase();
+            [
+                "already known",
+                "already imported",
+                "already exists",
+                "alreadyexists",
+            ]
+            .iter()
+            .any(|needle| message.contains(needle))
+        }
+        _ => false,
+    }
+}
 
 /// An ordinary single transaction payment, using the existing vault encoders.
 pub enum PaymentRequest {
@@ -52,8 +120,9 @@ pub struct PaymentReceipt {
 pub enum PaymentStatus {
     /// No mined payment found; retain the journal.
     Pending,
-    /// A mined failure or consumed nonce is not finalized yet. Retain the journal without
-    /// broadcasting or preparing another payment.
+    /// A mined failure is not finalized yet. Retain the journal without
+    /// broadcasting or preparing another payment. (A consumed nonce with no
+    /// receipt reports `Pending`, not this: see `observe_payment`.)
     Finalizing,
     /// The payment reverted in a finalized block. The original transaction
     /// cannot subsequently charge storage tokens, including after a fee replacement.
@@ -133,11 +202,15 @@ impl Wallet {
                 .map_err(|e| e.to_string())?;
         }
         let provider = self.to_provider();
+        let address = self.address();
+        // Set the chain id here so `fill` below needs no RPC call of its own.
+        let chain = rpc("chain id", None, || async { provider.get_chain_id().await }).await?;
         let mut tx = provider
             .transaction_request()
-            .with_from(self.address())
+            .with_from(address)
             .with_to(vault)
-            .with_input(calldata);
+            .with_input(calldata)
+            .with_chain_id(chain);
         if let Some(fees) = crate::retry::get_eip1559_fees(&provider, &self.transaction_config)
             .await
             .map_err(|e| e.to_string())?
@@ -145,18 +218,26 @@ impl Wallet {
             tx.set_max_fee_per_gas(fees.max_fee_per_gas);
             tx.set_max_priority_fee_per_gas(fees.max_priority_fee_per_gas);
         }
-        let gas = provider
-            .estimate_gas(tx.clone())
-            .await
-            .map_err(|e| e.to_string())?;
+        let gas = rpc("gas estimate", None, || {
+            let (provider, tx) = (&provider, tx.clone());
+            async move { provider.estimate_gas(tx).await }
+        })
+        .await?;
         tx.set_gas_limit(gas.saturating_mul(120) / 100);
-        tx.set_nonce(
-            provider
-                .get_transaction_count(self.address())
-                .pending()
-                .await
-                .map_err(|e| e.to_string())?,
-        );
+        // Two independent reads, highest wins. A public endpoint is a pool of
+        // replicas that can lag each other by a block or more; a single stale
+        // `pending` read signs a nonce the chain has already consumed, and those
+        // bytes can then never be mined. Measured on sepolia-rollup.arbitrum.io
+        // (2026-09-16): `pending=98` followed by `latest=99`, 1 pair in 150.
+        let pending_nonce = rpc("pending nonce", None, || async {
+            provider.get_transaction_count(address).pending().await
+        })
+        .await?;
+        let latest_nonce = rpc("latest nonce", None, || async {
+            provider.get_transaction_count(address).await
+        })
+        .await?;
+        tx.set_nonce(pending_nonce.max(latest_nonce));
         let envelope = provider
             .fill(tx)
             .await
@@ -176,11 +257,11 @@ impl Wallet {
         let mut bytes = signed.raw.as_slice();
         let tx = TxEnvelope::decode_2718(&mut bytes).map_err(|e| e.to_string())?;
         let (calldata, _) = request.calldata(self)?;
-        let chain = self
-            .to_provider()
-            .get_chain_id()
-            .await
-            .map_err(|e| e.to_string())?;
+        let provider = self.to_provider();
+        let chain = rpc("chain id", Some(OBSERVE_RETRY_INTERVAL_MS), || async {
+            provider.get_chain_id().await
+        })
+        .await?;
         if !bytes.is_empty()
             || tx.to() != Some(*self.network.payment_vault_address())
             || tx.input() != &calldata
@@ -197,6 +278,13 @@ impl Wallet {
 
     /// Broadcast exactly the journaled bytes. No re-signing, nonce change, or
     /// fee replacement occurs, including after an ambiguous RPC failure.
+    ///
+    /// Transport-level failures (HTTP 429/5xx, timeouts, backend deadline
+    /// responses) are retried with the same bytes: re-sending a signed
+    /// transaction cannot create a second payment, and an endpoint that already
+    /// holds it answers "already known", which is treated as success. A
+    /// definitive rejection (bad nonce, underpriced, insufficient funds) is
+    /// returned at once.
     pub async fn broadcast_payment(
         &self,
         signed: &SignedPayment,
@@ -204,14 +292,29 @@ impl Wallet {
     ) -> Result<TxHash, String> {
         let tx = self.validate_payment(signed, request).await?;
         let provider = self.to_provider();
-        let pending = provider
-            .send_raw_transaction(&signed.raw)
-            .await
-            .map_err(|e| e.to_string())?;
-        if pending.tx_hash() != tx.tx_hash() {
-            return Err("RPC returned a different transaction hash".into());
+        let mut retries: u8 = 0;
+        loop {
+            match provider.send_raw_transaction(&signed.raw).await {
+                Ok(pending) => {
+                    if pending.tx_hash() != tx.tx_hash() {
+                        return Err("RPC returned a different transaction hash".into());
+                    }
+                    return Ok(*tx.tx_hash());
+                }
+                Err(err) if is_already_known(&err) => return Ok(*tx.tx_hash()),
+                Err(err) if is_transient(&err) && retries < crate::retry::MAX_RETRIES => {
+                    retries += 1;
+                    let delay = std::time::Duration::from_millis(
+                        OBSERVE_RETRY_INTERVAL_MS * u64::from(retries).pow(2),
+                    );
+                    tracing::warn!(
+                        "Error broadcasting payment: {err}. Retry #{retries} in {delay:?} with the same bytes."
+                    );
+                    crate::runtime::sleep(delay).await;
+                }
+                Err(err) => return Err(err.to_string()),
+            }
         }
-        Ok(*tx.tx_hash())
     }
 
     /// Observe the journaled payment without broadcasting. Reverted and replaced
@@ -224,10 +327,13 @@ impl Wallet {
     ) -> Result<PaymentStatus, String> {
         let tx = self.validate_payment(signed, request).await?;
         let provider = self.to_provider();
-        if let Some(receipt) = provider
-            .get_transaction_receipt(*tx.tx_hash())
-            .await
-            .map_err(|e| e.to_string())?
+        let tx_hash = *tx.tx_hash();
+        if let Some(receipt) = rpc(
+            "payment receipt",
+            Some(OBSERVE_RETRY_INTERVAL_MS),
+            || async { provider.get_transaction_receipt(tx_hash).await },
+        )
+        .await?
         {
             if receipt.transaction_hash != *tx.tx_hash() {
                 return Err("RPC returned a different receipt transaction hash".into());
@@ -257,17 +363,28 @@ impl Wallet {
 
         // A missing receipt alone is never evidence of failure. Check whether
         // this nonce has been mined before asking for historical/finality data.
-        let latest_nonce = provider
-            .get_transaction_count(self.address())
-            .await
-            .map_err(|e| e.to_string())?;
+        let address = self.address();
+        let latest_nonce = rpc("latest nonce", Some(OBSERVE_RETRY_INTERVAL_MS), || async {
+            provider.get_transaction_count(address).await
+        })
+        .await?;
         if latest_nonce <= tx.nonce() {
             return Ok(PaymentStatus::Pending);
         }
         let finalized = finalized_header(&provider).await?;
-        let finalized_nonce = nonce_at(&provider, self.address(), &finalized).await?;
+        let finalized_nonce = nonce_at(&provider, address, &finalized).await?;
         if finalized_nonce <= tx.nonce() {
-            return Ok(PaymentStatus::Finalizing);
+            // The nonce looks consumed but nothing is final. That is either an
+            // unfinalised transaction on this nonce (this payment with its receipt
+            // not yet visible, a fee replacement, or something else) or simply a
+            // `latest` read served by a replica ahead of the one that served the
+            // caller's earlier reads — the two are indistinguishable from here, and
+            // a public endpoint produces the second routinely. Neither warrants
+            // giving up: the journaled bytes can be re-sent safely (a consumed
+            // nonce is rejected, never paid twice), and finality resolves a real
+            // replacement into `Replaced` below. Reporting `Finalizing` here made
+            // every stale read a failed upload (DEV-03 run 589, 2026-09-16).
+            return Ok(PaymentStatus::Pending);
         }
 
         // Find what actually consumed the nonce. It could be the original
@@ -275,16 +392,18 @@ impl Wallet {
         // that already paid. Neither permits assuming the payment failed.
         let (replacement_hash, block) =
             find_nonce_transaction(&provider, self.address(), tx.nonce(), &finalized).await?;
-        let replacement = provider
-            .get_transaction_by_hash(replacement_hash)
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or("finalized nonce transaction unavailable; retain the journal")?;
-        let receipt = provider
-            .get_transaction_receipt(replacement_hash)
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or("finalized nonce receipt unavailable; retain the journal")?;
+        let replacement = rpc(
+            "nonce transaction",
+            Some(OBSERVE_RETRY_INTERVAL_MS),
+            || async { provider.get_transaction_by_hash(replacement_hash).await },
+        )
+        .await?
+        .ok_or("finalized nonce transaction unavailable; retain the journal")?;
+        let receipt = rpc("nonce receipt", Some(OBSERVE_RETRY_INTERVAL_MS), || async {
+            provider.get_transaction_receipt(replacement_hash).await
+        })
+        .await?
+        .ok_or("finalized nonce receipt unavailable; retain the journal")?;
         if replacement.inner.tx_hash() != &replacement_hash
             || replacement.block_hash != Some(block.hash)
             || receipt.transaction_hash != replacement_hash
@@ -343,12 +462,30 @@ impl Wallet {
 }
 
 async fn finalized_header(provider: &ProviderWithWallet) -> Result<Header, String> {
-    provider
-        .get_block_by_number(BlockNumberOrTag::Finalized)
-        .await
-        .map_err(|e| e.to_string())?
-        .map(|block| block.header)
-        .ok_or_else(|| "finalized block unavailable; retain the journal".into())
+    rpc(
+        "finalized block",
+        Some(OBSERVE_RETRY_INTERVAL_MS),
+        || async {
+            provider
+                .get_block_by_number(BlockNumberOrTag::Finalized)
+                .await
+        },
+    )
+    .await?
+    .map(|block| block.header)
+    .ok_or_else(|| "finalized block unavailable; retain the journal".into())
+}
+
+async fn block_by_number(
+    provider: &ProviderWithWallet,
+    number: u64,
+) -> Result<Option<Block>, String> {
+    rpc(
+        "block by number",
+        Some(OBSERVE_RETRY_INTERVAL_MS),
+        || async { provider.get_block_by_number(number.into()).await },
+    )
+    .await
 }
 
 async fn receipt_is_canonical(
@@ -358,10 +495,8 @@ async fn receipt_is_canonical(
     let (Some(number), Some(hash)) = (receipt.block_number, receipt.block_hash) else {
         return Ok(false);
     };
-    Ok(provider
-        .get_block_by_number(number.into())
-        .await
-        .map_err(|e| e.to_string())?
+    Ok(block_by_number(provider, number)
+        .await?
         .is_some_and(|block| block.header.number == number && block.header.hash == hash))
 }
 
@@ -370,11 +505,18 @@ async fn nonce_at(
     address: crate::common::Address,
     block: &Header,
 ) -> Result<u64, String> {
-    provider
-        .get_transaction_count(address)
-        .block_id(BlockId::hash_canonical(block.hash))
-        .await
-        .map_err(|e| e.to_string())
+    let hash = block.hash;
+    rpc(
+        "nonce at block",
+        Some(OBSERVE_RETRY_INTERVAL_MS),
+        || async {
+            provider
+                .get_transaction_count(address)
+                .block_id(BlockId::hash_canonical(hash))
+                .await
+        },
+    )
+    .await
 }
 
 // Decode only transaction identity when scanning a block. Arbitrum blocks also
@@ -401,10 +543,8 @@ async fn find_nonce_transaction(
     let mut step = 1u64;
     while low > 0 {
         let probe = low.saturating_sub(step);
-        let block = provider
-            .get_block_by_number(probe.into())
-            .await
-            .map_err(|e| e.to_string())?
+        let block = block_by_number(provider, probe)
+            .await?
             .ok_or("nonce history unavailable; retain the journal")?;
         low = probe;
         if nonce_at(provider, address, &block.header).await? <= nonce {
@@ -415,10 +555,8 @@ async fn find_nonce_transaction(
     }
     while low < high {
         let mid = low + (high - low) / 2;
-        let block = provider
-            .get_block_by_number(mid.into())
-            .await
-            .map_err(|e| e.to_string())?
+        let block = block_by_number(provider, mid)
+            .await?
             .ok_or("nonce history unavailable; retain the journal")?;
         if nonce_at(provider, address, &block.header).await? > nonce {
             high = mid;
@@ -426,17 +564,22 @@ async fn find_nonce_transaction(
             low = mid + 1;
         }
     }
-    let header = provider
-        .get_block_by_number(low.into())
-        .await
-        .map_err(|e| e.to_string())?
+    let header = block_by_number(provider, low)
+        .await?
         .ok_or("nonce block unavailable; retain the journal")?
         .header;
-    let block: Option<Block<NonceTransaction>> = provider
-        .client()
-        .request("eth_getBlockByHash", (header.hash, true))
-        .await
-        .map_err(|e| e.to_string())?;
+    let block_hash = header.hash;
+    let block: Option<Block<NonceTransaction>> = rpc(
+        "nonce block transactions",
+        Some(OBSERVE_RETRY_INTERVAL_MS),
+        || async {
+            provider
+                .client()
+                .request("eth_getBlockByHash", (block_hash, true))
+                .await
+        },
+    )
+    .await?;
     let block = block.ok_or("nonce transactions unavailable; retain the journal")?;
     if block.header.hash != header.hash || block.header.number != header.number {
         return Err("inconsistent nonce block; retain the journal".into());
@@ -454,6 +597,57 @@ async fn find_nonce_transaction(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy::rpc::json_rpc::ErrorPayload;
+
+    fn error_resp(code: i64, message: &str) -> RpcError<TransportErrorKind> {
+        RpcError::ErrorResp(ErrorPayload {
+            code,
+            message: message.to_string().into(),
+            data: None,
+        })
+    }
+
+    #[test]
+    fn transport_failures_are_transient() {
+        // What sepolia-rollup.arbitrum.io returned on DEV-03 run 589.
+        assert!(is_transient(&RpcError::Transport(
+            TransportErrorKind::HttpError(alloy::transports::HttpError {
+                status: 429,
+                body: "Too Many Requests".into(),
+            })
+        )));
+        assert!(is_transient(&error_resp(
+            -32000,
+            "Post \"http://10.17.52.14:8547/rpc\": context deadline exceeded"
+        )));
+        assert!(is_transient(&RpcError::Transport(
+            TransportErrorKind::BackendGone
+        )));
+    }
+
+    #[test]
+    fn definitive_rejections_are_not_transient() {
+        for message in [
+            "nonce too low: address 0x00, tx: 5 state: 6",
+            "replacement transaction underpriced",
+            "insufficient funds for gas * price + value",
+            "execution reverted",
+        ] {
+            let err = error_resp(-32000, message);
+            assert!(!is_transient(&err), "{message}");
+            assert!(!is_already_known(&err), "{message}");
+        }
+    }
+
+    #[test]
+    fn already_known_is_success_not_failure() {
+        assert!(is_already_known(&error_resp(-32000, "already known")));
+        assert!(is_already_known(&error_resp(
+            -32000,
+            "ALREADY_EXISTS: already known"
+        )));
+        assert!(!is_transient(&error_resp(-32000, "already known")));
+    }
 
     #[test]
     fn nonce_scan_accepts_arbitrum_system_transactions() {

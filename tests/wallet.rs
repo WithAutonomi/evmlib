@@ -325,10 +325,19 @@ async fn journaled_payment_detects_a_finalized_nonce_replacement() {
             .await
             .unwrap()
     };
+    // Before finality a consumed nonce with no receipt is indistinguishable
+    // from a stale read on a load-balanced endpoint, so it stays `Pending`
+    // rather than `Finalizing`; re-sending the journaled bytes is refused by
+    // the node (nonce too low) and never pays twice.
     assert!(matches!(
         wallet.observe_payment(&signed, &request).await.unwrap(),
-        PaymentStatus::Finalizing
+        PaymentStatus::Pending
     ));
+    let rejected = wallet.broadcast_payment(&signed, &request).await;
+    assert!(
+        rejected.is_err(),
+        "a consumed nonce must be rejected, not silently accepted"
+    );
     finalize_test_chain(&wallet).await;
     let PaymentStatus::Replaced { transaction_hash } =
         wallet.observe_payment(&signed, &request).await.unwrap()
