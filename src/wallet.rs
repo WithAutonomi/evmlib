@@ -377,8 +377,10 @@ pub async fn transfer_gas_tokens(
 }
 
 /// Contains the payment error and the already succeeded batch payments (if any).
+///
+/// The error is boxed to keep the `Err` variant small (`clippy::result_large_err`).
 #[derive(Debug)]
-pub struct PayForQuotesError(pub Error, pub BTreeMap<QuoteHash, TxHash>);
+pub struct PayForQuotesError(pub Box<Error>, pub BTreeMap<QuoteHash, TxHash>);
 
 /// Use this wallet to pay for chunks in batched transfer transactions.
 /// If the amount of transfers is more than one transaction can contain, the transfers will be split up over multiple transactions.
@@ -397,12 +399,15 @@ pub async fn pay_for_quotes<T: IntoIterator<Item = QuotePayment>>(
     // Get current wallet token balance
     let wallet_balance = balance_of_tokens(wallet_address(&wallet), network)
         .await
-        .map_err(|err| PayForQuotesError(Error::from(err), Default::default()))?;
+        .map_err(|err| PayForQuotesError(Box::new(Error::from(err)), Default::default()))?;
 
     // Check if wallet contains enough payment tokens to pay for all quotes
     if wallet_balance < total_amount_to_be_paid {
         return Err(PayForQuotesError(
-            Error::InsufficientTokensForQuotes(wallet_balance, total_amount_to_be_paid),
+            Box::new(Error::InsufficientTokensForQuotes(
+                wallet_balance,
+                total_amount_to_be_paid,
+            )),
             Default::default(),
         ));
     }
@@ -412,7 +417,7 @@ pub async fn pay_for_quotes<T: IntoIterator<Item = QuotePayment>>(
     // Get current allowance
     let allowance = token_allowance(network, wallet_address(&wallet), vault_address)
         .await
-        .map_err(|err| PayForQuotesError(Error::from(err), Default::default()))?;
+        .map_err(|err| PayForQuotesError(Box::new(Error::from(err)), Default::default()))?;
 
     // TODO: Get rid of approvals altogether, by using permits or whatever..
     if allowance < total_amount_to_be_paid {
@@ -425,7 +430,7 @@ pub async fn pay_for_quotes<T: IntoIterator<Item = QuotePayment>>(
             transaction_config,
         )
         .await
-        .map_err(|err| PayForQuotesError(Error::from(err), Default::default()))?;
+        .map_err(|err| PayForQuotesError(Box::new(Error::from(err)), Default::default()))?;
     }
 
     let provider = http_provider_with_wallet(network.rpc_url().clone(), wallet);
@@ -454,7 +459,9 @@ pub async fn pay_for_quotes<T: IntoIterator<Item = QuotePayment>>(
         let (tx_hash, gas_info) = data_payments
             .pay_for_quotes(batch.clone(), transaction_config)
             .await
-            .map_err(|err| PayForQuotesError(Error::from(err), tx_hashes_by_quote.clone()))?;
+            .map_err(|err| {
+                PayForQuotesError(Box::new(Error::from(err)), tx_hashes_by_quote.clone())
+            })?;
 
         info!("Paid for batch of quotes with final tx hash: {tx_hash}");
 
