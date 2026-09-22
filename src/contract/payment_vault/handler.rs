@@ -127,16 +127,10 @@ where
         I: IntoIterator<Item = T>,
         T: Into<IPaymentVault::PoolCommitment>,
     {
-        let pool_commitments: Vec<IPaymentVault::PoolCommitment> = pool_commitments
-            .into_iter()
-            .map(|item| item.into())
-            .collect();
-
-        let calldata = self
-            .contract
-            .payForMerkleTree(depth, pool_commitments, merkle_payment_timestamp)
-            .calldata()
-            .to_owned();
+        let pool_commitments: Vec<IPaymentVault::PoolCommitment> =
+            pool_commitments.into_iter().map(Into::into).collect();
+        let calldata =
+            super::encode_merkle_payment(depth, pool_commitments, merkle_payment_timestamp).into();
 
         Ok((calldata, *self.contract.address()))
     }
@@ -183,7 +177,7 @@ where
     ///
     /// Retries up to 2 times with exponential backoff if the event is not found
     /// immediately (handles cases where the transaction may not be fully indexed).
-    async fn get_merkle_payment_event(
+    pub(crate) async fn get_merkle_payment_event(
         &self,
         tx_hash: TxHash,
     ) -> Result<IPaymentVault::MerklePaymentMade, Error> {
@@ -213,7 +207,7 @@ where
                             MAX_ATTEMPTS,
                             duration.as_millis()
                         );
-                        tokio::time::sleep(duration).await;
+                        crate::runtime::sleep(duration).await;
                     }
                     attempt += 1;
                 }

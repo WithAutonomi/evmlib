@@ -8,8 +8,8 @@
 
 use ant_merkle::Hasher;
 use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+use web_time::{SystemTime, UNIX_EPOCH};
 use xor_name::XorName;
 
 use super::merkle_payment::sha3_256;
@@ -47,12 +47,64 @@ pub enum MerkleTreeError {
 pub type Result<T> = std::result::Result<T, MerkleTreeError>;
 
 /// A Merkle tree built from XorNames (content addresses).
+#[derive(Clone)]
 pub struct MerkleTree {
     inner: ant_merkle::MerkleTree<Sha3Hasher>,
     leaf_count: usize,
     depth: u8,
     root: XorName,
     salts: Vec<[u8; 32]>,
+}
+
+// Persist the salted leaves, including random padding, so recovery recreates
+// exactly the same root and payment intent rather than generating new salts.
+#[derive(Serialize, Deserialize)]
+struct TreeSnapshot {
+    leaves: Vec<[u8; 32]>,
+    salts: Vec<[u8; 32]>,
+}
+
+impl Serialize for MerkleTree {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        TreeSnapshot {
+            leaves: self
+                .inner
+                .leaves()
+                .ok_or_else(|| serde::ser::Error::custom("missing Merkle leaves"))?,
+            salts: self.salts.clone(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for MerkleTree {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let snapshot = TreeSnapshot::deserialize(deserializer)?;
+        let count = snapshot.salts.len();
+        if !(MIN_LEAVES..=MAX_LEAVES).contains(&count)
+            || snapshot.leaves.len() != count.next_power_of_two()
+        {
+            return Err(serde::de::Error::custom(
+                "invalid Merkle snapshot dimensions",
+            ));
+        }
+        let inner = ant_merkle::MerkleTree::<Sha3Hasher>::from_leaves(&snapshot.leaves);
+        let root = inner
+            .root()
+            .ok_or_else(|| serde::de::Error::custom("missing Merkle root"))?;
+        Ok(Self {
+            inner,
+            leaf_count: count,
+            depth: tree_depth(count),
+            root: XorName(root),
+            salts: snapshot.salts,
+        })
+    }
 }
 
 impl MerkleTree {
@@ -596,6 +648,34 @@ mod tests {
     /// odd depths produced 2^floor(d/2) instead of 2^ceil(d/2), causing
     /// `WrongPoolCount` reverts at the payment vault for files in the chunk
     /// bands 5-8 (depth 3), 17-32 (depth 5) and 65-128 (depth 7).
+    #[test]
+    fn checkpoint_preserves_random_padding_and_address_proofs() {
+        let addresses = (0..3).map(|i| XorName([i; 32])).collect::<Vec<_>>();
+        let original = MerkleTree::from_xornames(addresses.clone()).unwrap();
+        let bytes = serde_json::to_vec(&original).unwrap();
+        let restored: MerkleTree = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(original.root(), restored.root());
+        assert_eq!(
+            original.reward_candidates(42).unwrap(),
+            restored.reward_candidates(42).unwrap()
+        );
+        for (index, address) in addresses.into_iter().enumerate() {
+            let proof = restored.generate_address_proof(index, address).unwrap();
+            assert!(proof.verify());
+            assert_eq!(
+                proof,
+                original.generate_address_proof(index, address).unwrap()
+            );
+        }
+        let invalid = TreeSnapshot {
+            leaves: vec![[0; 32]; 4],
+            salts: vec![[0; 32]; 1],
+        };
+        assert!(
+            serde_json::from_slice::<MerkleTree>(&serde_json::to_vec(&invalid).unwrap()).is_err()
+        );
+    }
+
     #[test]
     fn reward_candidate_count_matches_contract_for_all_depths() -> TestResult {
         for leaf_count in MIN_LEAVES..=MAX_LEAVES {
