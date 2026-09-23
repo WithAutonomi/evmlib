@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Retry the EIP-1559 fee estimate in the journal payment path
+  (`prepare_payment`) — a single 429/-32000 from the RPC no longer fails an
+  upload. A fee above a `LimitedAuto` limit is still rejected at once.
+
 ## 0.9.0
 
 - **ADR-0004 (commitment-bound quote pricing):** add signed commitment-binding

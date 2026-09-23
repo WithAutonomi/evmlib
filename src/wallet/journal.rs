@@ -7,6 +7,8 @@ use super::{ProviderWithWallet, Wallet};
 use crate::common::{Amount, Calldata, QuotePayment, TxHash, U256};
 use crate::contract::payment_vault::{MAX_TRANSFERS_PER_TRANSACTION, handler::PaymentVaultHandler};
 use crate::merkle_batch_payment::{PoolCommitment, PoolHash};
+use crate::retry::{Eip1559Fees, TransactionError, apply_fee_policy, needs_fee_estimate};
+use crate::transaction_config::TransactionConfig;
 use alloy::consensus::{Transaction, TxEnvelope, transaction::SignerRecoverable};
 use alloy::eips::eip2718::{Decodable2718, Encodable2718};
 use alloy::eips::{BlockId, BlockNumberOrTag};
@@ -81,6 +83,27 @@ fn is_already_known(err: &RpcError<TransportErrorKind>) -> bool {
         }
         _ => false,
     }
+}
+
+/// Read the EIP-1559 fee estimate with the standard backoff, then apply the
+/// configured fee policy. Only the RPC read is retried: a definitive
+/// `GasPriceAboveLimit` returns at once.
+async fn journal_fee_read<P: Provider>(
+    provider: &P,
+    config: &TransactionConfig,
+) -> Result<Option<Eip1559Fees>, String> {
+    let estimate = if needs_fee_estimate(config) {
+        Some(
+            rpc("gas price", None, || async {
+                provider.estimate_eip1559_fees().await
+            })
+            .await
+            .map_err(|e| TransactionError::CouldNotGetGasPrice(e).to_string())?,
+        )
+    } else {
+        None
+    };
+    apply_fee_policy(estimate, config).map_err(|e| e.to_string())
 }
 
 /// An ordinary single transaction payment, using the existing vault encoders.
@@ -211,10 +234,7 @@ impl Wallet {
             .with_to(vault)
             .with_input(calldata)
             .with_chain_id(chain);
-        if let Some(fees) = crate::retry::get_eip1559_fees(&provider, &self.transaction_config)
-            .await
-            .map_err(|e| e.to_string())?
-        {
+        if let Some(fees) = journal_fee_read(&provider, &self.transaction_config).await? {
             tx.set_max_fee_per_gas(fees.max_fee_per_gas);
             tx.set_max_priority_fee_per_gas(fees.max_priority_fee_per_gas);
         }
@@ -605,6 +625,74 @@ mod tests {
             message: message.to_string().into(),
             data: None,
         })
+    }
+
+    /// One throttled fee read must not fail the payment. The first
+    /// `eth_feeHistory` gets the -32000 a public load balancer returns under
+    /// load; the retry gets a valid history.
+    #[cfg(feature = "native")]
+    #[tokio::test]
+    async fn journal_fee_read_retries_a_transient_failure() {
+        use crate::transaction_config::MaxFeePerGas;
+        use alloy::providers::{ProviderBuilder, mock::Asserter};
+        use alloy::rpc::types::FeeHistory;
+
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new()
+            .disable_recommended_fillers()
+            .connect_mocked_client(asserter.clone());
+        asserter.push_failure(ErrorPayload {
+            code: -32000,
+            message: "Post \"http://10.17.52.14:8547/rpc\": context deadline exceeded".into(),
+            data: None,
+        });
+        asserter.push_success(&FeeHistory {
+            base_fee_per_gas: vec![100_000_000; 11],
+            gas_used_ratio: vec![0.5; 10],
+            oldest_block: 1,
+            reward: Some(vec![vec![1_000]; 10]),
+            ..Default::default()
+        });
+
+        let config = TransactionConfig {
+            max_fee_per_gas: MaxFeePerGas::Auto,
+        };
+        let fees = journal_fee_read(&provider, &config)
+            .await
+            .expect("the retried fee read should succeed")
+            .expect("Auto mode sets fees");
+        assert!(fees.max_fee_per_gas > 0);
+        assert!(asserter.read_q().is_empty());
+    }
+
+    #[cfg(feature = "native")]
+    #[tokio::test]
+    async fn journal_fee_read_does_not_retry_a_fee_over_the_limit() {
+        use crate::transaction_config::MaxFeePerGas;
+        use alloy::providers::{ProviderBuilder, mock::Asserter};
+        use alloy::rpc::types::FeeHistory;
+
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new()
+            .disable_recommended_fillers()
+            .connect_mocked_client(asserter.clone());
+        asserter.push_success(&FeeHistory {
+            base_fee_per_gas: vec![100_000_000; 11],
+            gas_used_ratio: vec![0.5; 10],
+            oldest_block: 1,
+            reward: Some(vec![vec![1_000]; 10]),
+            ..Default::default()
+        });
+
+        let config = TransactionConfig {
+            max_fee_per_gas: MaxFeePerGas::LimitedAuto(1),
+        };
+        let started = std::time::Instant::now();
+        let err = journal_fee_read(&provider, &config)
+            .await
+            .expect_err("a fee over the limit is rejected");
+        assert_eq!(err, TransactionError::GasPriceAboveLimit(1).to_string());
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 
     #[test]

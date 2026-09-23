@@ -1,6 +1,7 @@
 use crate::TX_TIMEOUT;
 use crate::common::{Address, Calldata, TxHash};
 use crate::transaction_config::{MaxFeePerGas, TransactionConfig};
+use alloy::eips::eip1559::Eip1559Estimation;
 use alloy::network::{Network, ReceiptResponse, TransactionBuilder};
 use alloy::providers::{PendingTransactionBuilder, Provider};
 use std::time::Duration;
@@ -381,67 +382,158 @@ pub(crate) struct Eip1559Fees {
     pub(crate) max_priority_fee_per_gas: u128,
 }
 
+/// Whether `transaction_config` needs a fee estimate from the RPC. `Custom` does:
+/// it takes the estimate's priority fee.
+pub(crate) fn needs_fee_estimate(transaction_config: &TransactionConfig) -> bool {
+    !matches!(transaction_config.max_fee_per_gas, MaxFeePerGas::Unlimited)
+}
+
+/// Fetch a single fee estimate and apply the configured fee policy.
+///
+/// The estimate is not retried here: `send_transaction_with_retries` already
+/// retries the whole send, and the journal path retries the read itself.
 pub(crate) async fn get_eip1559_fees<P: Provider<N>, N: Network>(
     provider: &P,
     transaction_config: &TransactionConfig,
 ) -> Result<Option<Eip1559Fees>, TransactionError> {
+    let estimate = if needs_fee_estimate(transaction_config) {
+        Some(
+            provider
+                .estimate_eip1559_fees()
+                .await
+                .map_err(|err| TransactionError::CouldNotGetGasPrice(err.to_string()))?,
+        )
+    } else {
+        None
+    };
+    apply_fee_policy(estimate, transaction_config)
+}
+
+/// Turn a fee estimate into transaction fees under the configured policy.
+///
+/// `estimate` must be `Some` whenever `needs_fee_estimate` is true.
+pub(crate) fn apply_fee_policy(
+    estimate: Option<Eip1559Estimation>,
+    transaction_config: &TransactionConfig,
+) -> Result<Option<Eip1559Fees>, TransactionError> {
+    // Only reached if a caller skipped the estimate that `needs_fee_estimate` asked for.
+    let estimate = || {
+        estimate.ok_or_else(|| {
+            TransactionError::CouldNotGetGasPrice("no fee estimate available".to_string())
+        })
+    };
     match transaction_config.max_fee_per_gas {
         MaxFeePerGas::Auto => {
             debug!("Using Auto mode for gas fees");
-            // Use EIP-1559 fee estimation which includes a buffer for base fee fluctuation
-            let eip1559_fees = provider
-                .estimate_eip1559_fees()
-                .await
-                .map_err(|err| TransactionError::CouldNotGetGasPrice(err.to_string()))?;
+            // The EIP-1559 estimate includes a buffer for base fee fluctuation
+            let estimate = estimate()?;
             Ok(Some(Eip1559Fees {
-                max_fee_per_gas: eip1559_fees.max_fee_per_gas,
-                max_priority_fee_per_gas: eip1559_fees.max_priority_fee_per_gas,
+                max_fee_per_gas: estimate.max_fee_per_gas,
+                max_priority_fee_per_gas: estimate.max_priority_fee_per_gas,
             }))
         }
         MaxFeePerGas::LimitedAuto(limit) => {
             debug!("Using LimitedAuto mode for gas fees with limit: {limit}");
-            // Use EIP-1559 fee estimation for better accuracy
-            let eip1559_fees = provider
-                .estimate_eip1559_fees()
-                .await
-                .map_err(|err| TransactionError::CouldNotGetGasPrice(err.to_string()))?;
-
-            if eip1559_fees.max_fee_per_gas > limit {
+            let estimate = estimate()?;
+            if estimate.max_fee_per_gas > limit {
                 warn!(
                     "Estimated max_fee_per_gas ({}) exceeds limit ({})",
-                    eip1559_fees.max_fee_per_gas, limit
+                    estimate.max_fee_per_gas, limit
                 );
                 Err(TransactionError::GasPriceAboveLimit(limit))
             } else {
                 Ok(Some(Eip1559Fees {
-                    max_fee_per_gas: eip1559_fees.max_fee_per_gas,
-                    max_priority_fee_per_gas: eip1559_fees.max_priority_fee_per_gas,
+                    max_fee_per_gas: estimate.max_fee_per_gas,
+                    max_priority_fee_per_gas: estimate.max_priority_fee_per_gas,
                 }))
             }
         }
         MaxFeePerGas::Custom(max_fee) => {
             debug!("Using Custom mode for gas fees with max_fee: {max_fee}");
             // Use custom max fee with estimated priority fee
-            let eip1559_fees = provider
-                .estimate_eip1559_fees()
-                .await
-                .map_err(|err| TransactionError::CouldNotGetGasPrice(err.to_string()))?;
-
-            if max_fee < eip1559_fees.max_fee_per_gas {
+            let estimate = estimate()?;
+            if max_fee < estimate.max_fee_per_gas {
                 warn!(
                     "Custom max_fee_per_gas ({}) is below estimated fee ({}). Transaction may be slow or fail.",
-                    max_fee, eip1559_fees.max_fee_per_gas
+                    max_fee, estimate.max_fee_per_gas
                 );
             }
-
             Ok(Some(Eip1559Fees {
                 max_fee_per_gas: max_fee,
-                max_priority_fee_per_gas: eip1559_fees.max_priority_fee_per_gas,
+                max_priority_fee_per_gas: estimate.max_priority_fee_per_gas,
             }))
         }
         MaxFeePerGas::Unlimited => {
             debug!("Using Unlimited mode for gas fees (no fee parameters will be set)");
             Ok(None)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ESTIMATE: Eip1559Estimation = Eip1559Estimation {
+        max_fee_per_gas: 1_000,
+        max_priority_fee_per_gas: 10,
+    };
+
+    fn config(max_fee_per_gas: MaxFeePerGas) -> TransactionConfig {
+        TransactionConfig { max_fee_per_gas }
+    }
+
+    fn fees(result: Result<Option<Eip1559Fees>, TransactionError>) -> Option<(u128, u128)> {
+        result
+            .expect("fee policy should succeed")
+            .map(|fees| (fees.max_fee_per_gas, fees.max_priority_fee_per_gas))
+    }
+
+    #[test]
+    fn only_unlimited_skips_the_fee_estimate() {
+        assert!(needs_fee_estimate(&config(MaxFeePerGas::Auto)));
+        assert!(needs_fee_estimate(&config(MaxFeePerGas::LimitedAuto(1))));
+        assert!(needs_fee_estimate(&config(MaxFeePerGas::Custom(1))));
+        assert!(!needs_fee_estimate(&config(MaxFeePerGas::Unlimited)));
+    }
+
+    #[test]
+    fn auto_passes_the_estimate_through() {
+        let result = apply_fee_policy(Some(ESTIMATE), &config(MaxFeePerGas::Auto));
+        assert_eq!(fees(result), Some((1_000, 10)));
+    }
+
+    #[test]
+    fn limited_auto_under_the_limit_uses_the_estimate() {
+        let result = apply_fee_policy(Some(ESTIMATE), &config(MaxFeePerGas::LimitedAuto(1_000)));
+        assert_eq!(fees(result), Some((1_000, 10)));
+    }
+
+    #[test]
+    fn limited_auto_over_the_limit_is_rejected() {
+        let result = apply_fee_policy(Some(ESTIMATE), &config(MaxFeePerGas::LimitedAuto(999)));
+        assert!(matches!(
+            result,
+            Err(TransactionError::GasPriceAboveLimit(999))
+        ));
+    }
+
+    #[test]
+    fn custom_below_the_estimate_keeps_the_custom_fee() {
+        let result = apply_fee_policy(Some(ESTIMATE), &config(MaxFeePerGas::Custom(500)));
+        assert_eq!(fees(result), Some((500, 10)));
+    }
+
+    #[test]
+    fn custom_above_the_estimate_keeps_the_custom_fee() {
+        let result = apply_fee_policy(Some(ESTIMATE), &config(MaxFeePerGas::Custom(5_000)));
+        assert_eq!(fees(result), Some((5_000, 10)));
+    }
+
+    #[test]
+    fn unlimited_sets_no_fees() {
+        let config = config(MaxFeePerGas::Unlimited);
+        assert_eq!(fees(apply_fee_policy(Some(ESTIMATE), &config)), None);
+        assert_eq!(fees(apply_fee_policy(None, &config)), None);
     }
 }
