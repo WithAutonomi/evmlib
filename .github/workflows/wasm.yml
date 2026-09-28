@@ -1,7 +1,5 @@
 name: WASM portability
 on:
-  push:
-    branches: [main, master, web-support]
   pull_request:
 jobs:
   wasm:
