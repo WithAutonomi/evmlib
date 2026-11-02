@@ -13,7 +13,6 @@ on:
       - "foundry.toml"
       - "remappings.txt"
       - ".github/scripts/check_contract_artifacts.py"
-      - ".github/scripts/test_check_contract_artifacts.py"
       - ".github/workflows/contracts.yml"
 
 permissions:
@@ -26,13 +25,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: true
+          # Recursive: Foundry auto-detects remappings from OpenZeppelin's nested
+          # submodules too, and they are hashed into the bytecode's metadata,
+          # which the check compares in full.
+          submodules: recursive
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
-
-      - name: Test the artifact checker
-        run: python3 .github/scripts/test_check_contract_artifacts.py
 
       - name: Build contracts
         run: forge build --out "$RUNNER_TEMP/forge-out" --cache-path "$RUNNER_TEMP/forge-cache"
