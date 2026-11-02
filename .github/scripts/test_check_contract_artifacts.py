@@ -79,6 +79,59 @@ class MetadataStripping(unittest.TestCase):
         raw = EXECUTABLE + blob + len(blob).to_bytes(2, "big")
         self.assertEqual(metadata_length(raw), 0)
 
+    # Round 2: maps that are well-formed CBOR but not solc metadata.
+
+    def test_reviewer_counterexample_is_compared_in_full(self):
+        # {"solc": 1} plus its length. Valid CBOR with a whitelisted key, but solc
+        # writes a 3-byte version, and these bytes also execute (LOG1/PUSH5/STOP).
+        self.assertEqual(code("0x600060006000a164736f6c63010007"), "600060006000a164736f6c63010007")
+        self.assertNotEqual(code("0x600060006000a164736f6c63010007"), code("0x600060006000"))
+
+    def assert_not_metadata(self, blob, why):
+        raw = EXECUTABLE + blob + len(blob).to_bytes(2, "big")
+        self.assertEqual(metadata_length(raw), 0, why)
+
+    def assert_metadata(self, blob, why):
+        raw = EXECUTABLE + blob + len(blob).to_bytes(2, "big")
+        self.assertEqual(metadata_length(raw), len(blob) + 2, why)
+        self.assertEqual(code(raw.hex()), EXECUTABLE.hex(), why)
+
+    SOLC = bytes([0x64]) + b"solc" + bytes([0x43, 0, 8, 28])
+    IPFS = bytes([0x64]) + b"ipfs" + bytes([0x58, 0x22]) + bytes([0x11]) * 34
+
+    def test_duplicate_keys_are_not_metadata(self):
+        self.assert_not_metadata(bytes([0xA2]) + self.SOLC + self.SOLC, "duplicate solc")
+
+    def test_byte_string_keys_are_not_metadata(self):
+        key_as_bytes = bytes([0x44]) + b"solc" + bytes([0x43, 0, 8, 28])
+        self.assert_not_metadata(bytes([0xA1]) + key_as_bytes, "byte-string key")
+
+    def test_wrong_value_types_and_lengths_are_not_metadata(self):
+        cases = {
+            "solc as uint": bytes([0xA1, 0x64]) + b"solc" + bytes([0x01]),
+            "solc 2 bytes": bytes([0xA1, 0x64]) + b"solc" + bytes([0x42, 0, 8]),
+            "solc empty text": bytes([0xA1, 0x64]) + b"solc" + bytes([0x60]),
+            "ipfs 33 bytes": bytes([0xA2, 0x64]) + b"ipfs" + bytes([0x58, 0x21]) + bytes(33) + self.SOLC,
+            "ipfs as text": bytes([0xA2, 0x64]) + b"ipfs" + bytes([0x63]) + b"abc" + self.SOLC,
+            "experimental false": bytes([0xA2, 0x6C]) + b"experimental" + bytes([0xF4]) + self.SOLC,
+        }
+        for why, blob in cases.items():
+            self.assert_not_metadata(blob, why)
+
+    def test_solc_is_required_and_one_hash_at_most(self):
+        self.assert_not_metadata(bytes([0xA1]) + self.IPFS, "no solc")
+        bzzr1 = bytes([0x65]) + b"bzzr1" + bytes([0x58, 0x20]) + bytes(32)
+        self.assert_not_metadata(bytes([0xA3]) + self.IPFS + bzzr1 + self.SOLC, "two hashes")
+
+    def test_shapes_solc_emits_are_metadata(self):
+        self.assert_metadata(bytes([0xA2]) + self.IPFS + self.SOLC, "ipfs + release solc")
+        self.assert_metadata(bytes([0xA1]) + self.SOLC, "bytecodeHash none")
+        prerelease = bytes([0x64]) + b"solc" + bytes([0x78, 0x18]) + b"0.8.29-nightly.2025.1.1+"
+        self.assert_metadata(bytes([0xA2]) + self.IPFS + prerelease, "prerelease solc")
+        bzzr1 = bytes([0x65]) + b"bzzr1" + bytes([0x58, 0x20]) + bytes(32)
+        experimental = bytes([0x6C]) + b"experimental" + bytes([0xF5])
+        self.assert_metadata(bytes([0xA3]) + bzzr1 + experimental + self.SOLC, "bzzr1 + experimental")
+
     def test_empty_and_tiny_code(self):
         self.assertEqual(code("0x"), "")
         self.assertEqual(code("0x00"), "00")

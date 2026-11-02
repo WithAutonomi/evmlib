@@ -18,9 +18,11 @@ identical builds. The code before it is deterministic for a pinned solc.
 
 The tail is only stripped when it really is solc metadata: the last two bytes
 give a length, and the bytes before them must be exactly one well-formed CBOR
-map of that length whose keys are all known metadata keys. Anything else
-(no metadata, a truncated or oversized footer, non-CBOR bytes) is compared as
-full bytecode, so a check can never pass by stripping executable code.
+map of that length, shaped like solc's (unique text keys, `solc` present, and
+each value of the type and length solc writes; see HASH_LENGTHS below).
+Anything else (no metadata, a truncated or oversized footer, non-CBOR bytes, a
+map that merely looks like metadata) is compared as full bytecode, so a check
+can't pass by stripping executable code.
 
 artifacts/AutonomiNetworkToken.json is not checked: it is a Hardhat artifact
 whose source (contracts/AutonomiNetworkToken.sol) is not in this repo.
@@ -38,24 +40,31 @@ def canonical(value):
     return json.dumps(value, sort_keys=True)
 
 
-# Keys solc writes into the metadata map (bytecodeHash ipfs/bzzr0/bzzr1, the
-# compiler version, and the experimental flag).
-METADATA_KEYS = {"ipfs", "bzzr0", "bzzr1", "solc", "experimental"}
+# What solc writes into the metadata map. Each key appears at most once, as a
+# CBOR text string, with exactly this value shape:
+#   ipfs          byte string, 34 bytes (sha2-256 multihash)
+#   bzzr0, bzzr1  byte string, 32 bytes
+#   solc          byte string, 3 bytes (release x.y.z), or a text string
+#                 (prerelease version)
+#   experimental  true
+# `solc` is required: every build that appends a metadata map includes it.
+HASH_LENGTHS = {"ipfs": 34, "bzzr0": 32, "bzzr1": 32}
 
 
 def _cbor_item(data, pos):
     """Parse one CBOR item of the kinds solc metadata uses.
 
-    Returns (value, next_pos), or None if `data` doesn't hold such an item at
-    `pos`. Supports unsigned ints, byte and text strings, maps, and the
-    simple values false/true. Strings are returned as bytes.
+    Returns ((kind, value), next_pos), or None if `data` doesn't hold such an
+    item at `pos`. Kinds: "uint", "bytes", "text", "bool", and "map", whose
+    value is a list of (key, value) pairs in order (duplicates kept, so the
+    caller can reject them).
     """
     if pos >= len(data):
         return None
     major, info = data[pos] >> 5, data[pos] & 0x1F
     pos += 1
     if major == 7:
-        return (info == 21, pos) if info in (20, 21) else None
+        return (("bool", info == 21), pos) if info in (20, 21) else None
     if info < 24:
         arg = info
     elif info in (24, 25):
@@ -67,24 +76,50 @@ def _cbor_item(data, pos):
     else:
         return None
     if major == 0:
-        return arg, pos
+        return ("uint", arg), pos
     if major in (2, 3):
         if pos + arg > len(data):
             return None
-        return bytes(data[pos:pos + arg]), pos + arg
+        raw = bytes(data[pos:pos + arg])
+        if major == 2:
+            return ("bytes", raw), pos + arg
+        try:
+            return ("text", raw.decode("utf-8")), pos + arg
+        except UnicodeDecodeError:
+            return None
     if major == 5:
-        items = {}
+        pairs = []
         for _ in range(arg):
             key = _cbor_item(data, pos)
-            if key is None or not isinstance(key[0], bytes):
+            if key is None:
                 return None
             value = _cbor_item(data, key[1])
             if value is None:
                 return None
-            items[key[0]] = value[0]
+            pairs.append((key[0], value[0]))
             pos = value[1]
-        return items, pos
+        return ("map", pairs), pos
     return None
+
+
+def _is_solc_metadata(pairs):
+    """True only for a map shaped exactly like solc's metadata (see above)."""
+    seen = set()
+    for (key_kind, key), (kind, value) in pairs:
+        if key_kind != "text" or key in seen:
+            return False
+        seen.add(key)
+        if key in HASH_LENGTHS:
+            ok = kind == "bytes" and len(value) == HASH_LENGTHS[key]
+        elif key == "solc":
+            ok = (kind == "bytes" and len(value) == 3) or (kind == "text" and value != "")
+        elif key == "experimental":
+            ok = kind == "bool" and value
+        else:
+            ok = False
+        if not ok:
+            return False
+    return "solc" in seen and len(seen & HASH_LENGTHS.keys()) <= 1
 
 
 def metadata_length(raw):
@@ -95,13 +130,11 @@ def metadata_length(raw):
     if cbor_len == 0 or cbor_len + 2 > len(raw):
         return 0
     blob = raw[-2 - cbor_len:-2]
-    if blob[0] >> 5 != 5:  # must be a CBOR map
-        return 0
     parsed = _cbor_item(blob, 0)
     if parsed is None or parsed[1] != len(blob):
         return 0  # malformed, or doesn't fill exactly the stated length
-    keys = {key.decode("utf-8", "replace") for key in parsed[0]}
-    if not keys or not keys <= METADATA_KEYS:
+    (kind, pairs), _ = parsed
+    if kind != "map" or not _is_solc_metadata(pairs):
         return 0
     return cbor_len + 2
 
