@@ -13,6 +13,7 @@ on:
       - "foundry.toml"
       - "remappings.txt"
       - ".github/scripts/check_contract_artifacts.py"
+      - ".github/scripts/test_check_contract_artifacts.py"
       - ".github/workflows/contracts.yml"
 
 permissions:
@@ -29,6 +30,9 @@ jobs:
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Test the artifact checker
+        run: python3 .github/scripts/test_check_contract_artifacts.py
 
       - name: Build contracts
         run: forge build --out "$RUNNER_TEMP/forge-out" --cache-path "$RUNNER_TEMP/forge-cache"
