@@ -18,22 +18,54 @@ identical builds. The code before it is deterministic for a pinned solc.
 
 The tail is only stripped when it really is solc metadata: the last two bytes
 give a length, and the bytes before them must be exactly one well-formed CBOR
-map of that length, shaped like solc's (unique text keys, `solc` present, and
-each value of the type and length solc writes; see HASH_LENGTHS below).
-Anything else (no metadata, a truncated or oversized footer, non-CBOR bytes, a
-map that merely looks like metadata) is compared as full bytecode, so a check
-can't pass by stripping executable code.
+map of that length, shaped like solc's (unique text keys, each value of the
+type and length solc writes; see HASH_LENGTHS below) and naming the compiler
+foundry.toml pins (`solc_version`) as its `solc` version. Anything else (no
+metadata, a truncated or oversized footer, non-CBOR bytes, a map that merely
+looks like metadata, another compiler version) is compared as full bytecode,
+so a check can't pass by stripping executable code.
 
 artifacts/AutonomiNetworkToken.json is not checked: it is a Hardhat artifact
 whose source (contracts/AutonomiNetworkToken.sol) is not in this repo.
 """
 
 import json
+import re
 import sys
+import tomllib
 from pathlib import Path
 
 COMMITTED = Path("artifacts/PaymentVaultV2.json")
 COMMITTED_ABI = Path("abi/IPaymentVault.json")
+FOUNDRY_TOML = Path(__file__).resolve().parents[2] / "foundry.toml"
+
+
+def solc_version_bytes(version):
+    """The 3 bytes solc writes as `solc` in its metadata for release `x.y.z`.
+
+    Raises ValueError for anything else (ranges, prereleases, components > 255).
+    """
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
+    if not match or any(int(part) > 255 for part in match.groups()):
+        raise ValueError(f"not a release solc version: {version!r}")
+    return bytes(int(part) for part in match.groups())
+
+
+def pinned_solc():
+    """foundry.toml's [profile.default] solc_version, as solc writes it in metadata."""
+    config = tomllib.loads(FOUNDRY_TOML.read_text())
+    version = config.get("profile", {}).get("default", {}).get("solc_version")
+    if not isinstance(version, str):
+        sys.exit(f"{FOUNDRY_TOML}: [profile.default] solc_version is not set")
+    try:
+        return solc_version_bytes(version)
+    except ValueError as e:
+        sys.exit(f"{FOUNDRY_TOML}: {e}")
+
+
+# The compiler the artifacts are built with. A metadata tail naming any other
+# version can't come from this build, so it is not stripped.
+PINNED_SOLC = pinned_solc()
 
 
 def canonical(value):
@@ -44,8 +76,9 @@ def canonical(value):
 # CBOR text string, with exactly this value shape:
 #   ipfs          byte string, 34 bytes (sha2-256 multihash)
 #   bzzr0, bzzr1  byte string, 32 bytes
-#   solc          byte string, 3 bytes (release x.y.z), or a text string
-#                 (prerelease version)
+#   solc          byte string, 3 bytes (release x.y.z); must be PINNED_SOLC.
+#                 (A prerelease solc writes a text string here instead; the
+#                 pin is a release, so that is rejected too.)
 #   experimental  true
 # `solc` is required: every build that appends a metadata map includes it.
 HASH_LENGTHS = {"ipfs": 34, "bzzr0": 32, "bzzr1": 32}
@@ -112,7 +145,7 @@ def _is_solc_metadata(pairs):
         if key in HASH_LENGTHS:
             ok = kind == "bytes" and len(value) == HASH_LENGTHS[key]
         elif key == "solc":
-            ok = (kind == "bytes" and len(value) == 3) or (kind == "text" and value != "")
+            ok = kind == "bytes" and value == PINNED_SOLC
         elif key == "experimental":
             ok = kind == "bool" and value
         else:

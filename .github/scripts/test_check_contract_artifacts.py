@@ -12,12 +12,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from check_contract_artifacts import code, metadata_length  # noqa: E402
+from check_contract_artifacts import (  # noqa: E402
+    PINNED_SOLC,
+    code,
+    metadata_length,
+    solc_version_bytes,
+)
 
 REPO = Path(__file__).resolve().parents[2]
 
 
-def solc_tail(ipfs_byte=0x11, version=(0, 8, 28)):
+def solc_tail(ipfs_byte=0x11, version=PINNED_SOLC):
     """A metadata tail shaped like solc's: {ipfs: <34 bytes>, solc: <3 bytes>} + length."""
     blob = (
         bytes([0xA2])
@@ -69,7 +74,7 @@ class MetadataStripping(unittest.TestCase):
         self.assertEqual(metadata_length(raw), 0)
 
     def test_map_shorter_than_the_footer_is_not_stripped(self):
-        blob = bytes([0xA1, 0x64]) + b"solc" + bytes([0x43, 0, 8, 28])
+        blob = bytes([0xA1, 0x64]) + b"solc" + bytes([0x43]) + PINNED_SOLC
         padded = blob + bytes([0x00])  # one byte of garbage inside the stated length
         raw = EXECUTABLE + padded + len(padded).to_bytes(2, "big")
         self.assertEqual(metadata_length(raw), 0)
@@ -96,20 +101,20 @@ class MetadataStripping(unittest.TestCase):
         self.assertEqual(metadata_length(raw), len(blob) + 2, why)
         self.assertEqual(code(raw.hex()), EXECUTABLE.hex(), why)
 
-    SOLC = bytes([0x64]) + b"solc" + bytes([0x43, 0, 8, 28])
+    SOLC = bytes([0x64]) + b"solc" + bytes([0x43]) + PINNED_SOLC
     IPFS = bytes([0x64]) + b"ipfs" + bytes([0x58, 0x22]) + bytes([0x11]) * 34
 
     def test_duplicate_keys_are_not_metadata(self):
         self.assert_not_metadata(bytes([0xA2]) + self.SOLC + self.SOLC, "duplicate solc")
 
     def test_byte_string_keys_are_not_metadata(self):
-        key_as_bytes = bytes([0x44]) + b"solc" + bytes([0x43, 0, 8, 28])
+        key_as_bytes = bytes([0x44]) + b"solc" + bytes([0x43]) + PINNED_SOLC
         self.assert_not_metadata(bytes([0xA1]) + key_as_bytes, "byte-string key")
 
     def test_wrong_value_types_and_lengths_are_not_metadata(self):
         cases = {
             "solc as uint": bytes([0xA1, 0x64]) + b"solc" + bytes([0x01]),
-            "solc 2 bytes": bytes([0xA1, 0x64]) + b"solc" + bytes([0x42, 0, 8]),
+            "solc 2 bytes": bytes([0xA1, 0x64]) + b"solc" + bytes([0x42]) + PINNED_SOLC[:2],
             "solc empty text": bytes([0xA1, 0x64]) + b"solc" + bytes([0x60]),
             "ipfs 33 bytes": bytes([0xA2, 0x64]) + b"ipfs" + bytes([0x58, 0x21]) + bytes(33) + self.SOLC,
             "ipfs as text": bytes([0xA2, 0x64]) + b"ipfs" + bytes([0x63]) + b"abc" + self.SOLC,
@@ -126,11 +131,39 @@ class MetadataStripping(unittest.TestCase):
     def test_shapes_solc_emits_are_metadata(self):
         self.assert_metadata(bytes([0xA2]) + self.IPFS + self.SOLC, "ipfs + release solc")
         self.assert_metadata(bytes([0xA1]) + self.SOLC, "bytecodeHash none")
-        prerelease = bytes([0x64]) + b"solc" + bytes([0x78, 0x18]) + b"0.8.29-nightly.2025.1.1+"
-        self.assert_metadata(bytes([0xA2]) + self.IPFS + prerelease, "prerelease solc")
         bzzr1 = bytes([0x65]) + b"bzzr1" + bytes([0x58, 0x20]) + bytes(32)
         experimental = bytes([0x6C]) + b"experimental" + bytes([0xF5])
         self.assert_metadata(bytes([0xA3]) + bzzr1 + experimental + self.SOLC, "bzzr1 + experimental")
+
+    # Round 3: the solc version must be the one foundry.toml pins.
+
+    def test_reviewer_counterexample_with_an_impossible_version_is_compared_in_full(self):
+        # {"solc": h'ffffff'} plus its length. Shaped like release metadata, but
+        # the pinned compiler can't write version 255.255.255, and these bytes
+        # execute (LOG1/PUSH5/SELFDESTRUCT/STOP).
+        full = "600060006000a164736f6c6343ffffff000a"
+        self.assertEqual(code("0x" + full), full)
+        self.assertNotEqual(code("0x" + full), code("0x600060006000"))
+
+    def test_other_solc_versions_are_not_metadata(self):
+        major, minor, patch = PINNED_SOLC
+        for why, version in {
+            "previous patch": bytes([major, minor, (patch - 1) % 256]),
+            "next patch": bytes([major, minor, (patch + 1) % 256]),
+            "next minor": bytes([major, (minor + 1) % 256, patch]),
+        }.items():
+            solc = bytes([0x64]) + b"solc" + bytes([0x43]) + version
+            self.assert_not_metadata(bytes([0xA2]) + self.IPFS + solc, why)
+
+    def test_prerelease_solc_is_not_metadata(self):
+        prerelease = bytes([0x64]) + b"solc" + bytes([0x78, 0x18]) + b"0.8.29-nightly.2025.1.1+"
+        self.assert_not_metadata(bytes([0xA2]) + self.IPFS + prerelease, "prerelease solc")
+
+    def test_solc_version_bytes(self):
+        self.assertEqual(solc_version_bytes("0.8.28"), bytes([0, 8, 28]))
+        for bad in ("0.8", "^0.8.28", "0.8.28-nightly", "0.8.256", "v0.8.28", ""):
+            with self.assertRaises(ValueError, msg=bad):
+                solc_version_bytes(bad)
 
     def test_empty_and_tiny_code(self):
         self.assertEqual(code("0x"), "")
