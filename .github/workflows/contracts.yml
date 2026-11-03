@@ -32,6 +32,11 @@ jobs:
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+        with:
+          # Pinned so a Foundry release can't change the build (e.g. the
+          # remappings it auto-detects) under this byte-for-byte check.
+          # Bump deliberately, with the check passing on the new version.
+          version: v1.8.7
 
       - name: Build contracts
         run: forge build --out "$RUNNER_TEMP/forge-out" --cache-path "$RUNNER_TEMP/forge-cache"
