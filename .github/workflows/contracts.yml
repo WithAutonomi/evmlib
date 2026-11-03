@@ -1,0 +1,45 @@
+name: Contract artifacts
+
+# The committed PaymentVaultV2 artifacts are what the tests deploy, so check
+# they still match contracts/. Only runs when a PR touches the contracts, the
+# artifacts or the Foundry config.
+on:
+  pull_request:
+    paths:
+      - "contracts/**"
+      - "artifacts/**"
+      - "abi/**"
+      - "lib/**"
+      - "foundry.toml"
+      - "remappings.txt"
+      - ".github/scripts/check_contract_artifacts.py"
+      - ".github/workflows/contracts.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  artifacts:
+    name: Artifacts match sources
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Recursive: Foundry auto-detects remappings from OpenZeppelin's nested
+          # submodules too, and they are hashed into the bytecode's metadata,
+          # which the check compares in full.
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          # Pinned so a Foundry release can't change the build (e.g. the
+          # remappings it auto-detects) under this byte-for-byte check.
+          # Bump deliberately, with the check passing on the new version.
+          version: v1.8.7
+
+      - name: Build contracts
+        run: forge build --out "$RUNNER_TEMP/forge-out" --cache-path "$RUNNER_TEMP/forge-cache"
+
+      - name: Compare with committed artifacts
+        run: python3 .github/scripts/check_contract_artifacts.py "$RUNNER_TEMP/forge-out"

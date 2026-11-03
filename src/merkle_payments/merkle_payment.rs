@@ -276,3 +276,112 @@ impl MerklePaymentProof {
         self.winner_pool.hash()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::merkle_payments::MerkleTree;
+
+    const TIMESTAMP: u64 = 1_700_000_000;
+
+    /// A pool whose candidate `i` quotes `100 + i`, so every index has a
+    /// distinct price and a mismatch report names the right candidate.
+    fn make_pool() -> MerklePaymentCandidatePool {
+        let leaves = (0..4u8).map(|i| XorName([i; 32])).collect();
+        let tree = MerkleTree::from_xornames(leaves).expect("tree");
+        let midpoint_proof = tree
+            .reward_candidates(TIMESTAMP)
+            .expect("reward candidates")
+            .remove(0);
+        let candidate_nodes = std::array::from_fn(|i| MerklePaymentCandidateNode {
+            pub_key: vec![i as u8; 4],
+            price: Amount::from(100 + i as u64),
+            reward_address: RewardsAddress::new([i as u8; 20]),
+            merkle_payment_timestamp: TIMESTAMP,
+            signature: vec![],
+            committed_key_count: 0,
+            commitment_pin: None,
+        });
+        MerklePaymentCandidatePool {
+            midpoint_proof,
+            candidate_nodes,
+        }
+    }
+
+    #[test]
+    fn verify_prices_accepts_matching_on_chain_prices() {
+        let pool = make_pool();
+        let on_chain = [pool.to_commitment()];
+        assert_eq!(pool.verify_prices(&on_chain, &pool.hash()), Ok(()));
+    }
+
+    #[test]
+    fn verify_prices_checks_the_winner_not_the_first_commitment() {
+        let pool = make_pool();
+        // A decoy pool listed first, with a different hash and every price off.
+        let mut decoy = pool.to_commitment();
+        decoy.pool_hash = [0xAA; 32];
+        for candidate in &mut decoy.candidates {
+            candidate.price += Amount::from(1u64);
+        }
+        let on_chain = [decoy, pool.to_commitment()];
+        assert_eq!(pool.verify_prices(&on_chain, &pool.hash()), Ok(()));
+    }
+
+    #[test]
+    fn verify_prices_rejects_a_mismatch_at_the_first_candidate() {
+        let pool = make_pool();
+        let mut commitment = pool.to_commitment();
+        commitment.candidates[0].price = Amount::from(999u64);
+        assert_eq!(
+            pool.verify_prices(&[commitment], &pool.hash()),
+            Err(MerklePaymentVerificationError::PriceMismatch {
+                index: 0,
+                on_chain_price: "999".to_string(),
+                expected_price: "100".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn verify_prices_rejects_a_mismatch_at_the_last_candidate() {
+        let pool = make_pool();
+        let last = CANDIDATES_PER_POOL - 1;
+        let mut commitment = pool.to_commitment();
+        commitment.candidates[last].price = Amount::from(999u64);
+        assert_eq!(
+            pool.verify_prices(&[commitment], &pool.hash()),
+            Err(MerklePaymentVerificationError::PriceMismatch {
+                index: last,
+                on_chain_price: "999".to_string(),
+                expected_price: (100 + last).to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn verify_prices_reports_the_first_of_several_mismatches() {
+        let pool = make_pool();
+        let mut commitment = pool.to_commitment();
+        commitment.candidates[3].price = Amount::ZERO;
+        commitment.candidates[7].price = Amount::ZERO;
+        assert!(matches!(
+            pool.verify_prices(&[commitment], &pool.hash()),
+            Err(MerklePaymentVerificationError::PriceMismatch { index: 3, .. })
+        ));
+    }
+
+    #[test]
+    fn verify_prices_rejects_a_winner_hash_missing_from_the_commitments() {
+        let pool = make_pool();
+        let on_chain = [pool.to_commitment()];
+        assert_eq!(
+            pool.verify_prices(&on_chain, &[0xBB; 32]),
+            Err(MerklePaymentVerificationError::WinnerPoolNotInCommitments)
+        );
+        assert_eq!(
+            pool.verify_prices(&[], &pool.hash()),
+            Err(MerklePaymentVerificationError::WinnerPoolNotInCommitments)
+        );
+    }
+}
